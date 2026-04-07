@@ -128,6 +128,129 @@ export function classifyLeadSource(customTags: string[]): string | null {
   return null;
 }
 
+// ── Signature Extractor ────────────────────────────────────────────────────
+// Ported from tools/backfill-campaign-data.mjs
+
+const CLOSING_PHRASES = new Set([
+  'best', 'best regards', 'warm regards', 'kind regards', 'thanks',
+  'thanks again', 'talk soon', 'appreciate your time', 'all the best',
+  'take care', 'sincerely', 'regards',
+]);
+
+const CLOSING_RE = new RegExp(
+  '^(' + [...CLOSING_PHRASES].map(p => p.replace(/\s+/g, '\\s+')).join('|') + ')\\s*,?\\s*$',
+  'im',
+);
+
+function splitAtDepth(text: string): string[] {
+  const options: string[] = [];
+  let current = '';
+  let depth = 0;
+  let i = 0;
+  while (i < text.length) {
+    if (text[i] === '{' && text[i + 1] === '{') {
+      depth++; current += '{{'; i += 2;
+    } else if (text[i] === '}' && text[i + 1] === '}') {
+      depth--; current += '}}'; i += 2;
+    } else if (text[i] === '|' && depth === 0) {
+      options.push(current); current = ''; i++;
+    } else {
+      current += text[i]; i++;
+    }
+  }
+  options.push(current);
+  return options;
+}
+
+function isClosingLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) return false;
+  if (CLOSING_RE.test(trimmed)) return true;
+  const cleaned = trimmed.replace(/,?\s*$/, '');
+  const m = cleaned.match(/^\{\{RANDOM\|(.+)\}\}$/);
+  if (m) {
+    const options = splitAtDepth(m[1]);
+    const firstResolved = resolveSpintax(options[0]).trim().replace(/,?\s*$/, '').toLowerCase();
+    if (CLOSING_PHRASES.has(firstResolved)) return true;
+  }
+  return false;
+}
+
+export function extractSignature(body: string): { body: string; signature: string } {
+  if (!body) return { body: '', signature: '' };
+  const lines = body.split('\n');
+  const searchStart = Math.max(0, lines.length - 10);
+  for (let i = searchStart; i < lines.length; i++) {
+    if (isClosingLine(lines[i])) {
+      return {
+        body: lines.slice(0, i).join('\n').trim(),
+        signature: lines.slice(i).join('\n').trim(),
+      };
+    }
+  }
+  return { body: body.trim(), signature: '' };
+}
+
+// ── Segment Normalization ──────────────────────────────────────────────────
+
+const SEGMENT_MAP: Record<string, string> = {
+  'mca': 'working_capital', 'shops': 'retail', 'shop': 'retail',
+  'auto': 'automotive', 'auto_repair': 'automotive',
+  'medical': 'healthcare', 'dental': 'healthcare', 'vet': 'healthcare', 'veterinary': 'healthcare',
+  'plumbing': 'home_services', 'electrical': 'home_services', 'roofing': 'home_services', 'cleaning': 'home_services',
+  'lawn': 'landscaping', 'lawn_care': 'landscaping',
+  'food': 'restaurant', 'bar': 'restaurant', 'cafe': 'restaurant',
+  'hotel': 'hospitality', 'motel': 'hospitality',
+  'gym': 'fitness', 'salon': 'beauty', 'spa': 'beauty', 'barber': 'beauty',
+  'trucking_and_logistics': 'trucking', 'logistics': 'trucking',
+  'school': 'education', 'daycare': 'education',
+  'professional_services': 'professional', 'consulting': 'professional',
+  'accounting': 'professional', 'legal': 'professional',
+  'farming': 'agriculture', 'ranch': 'agriculture',
+  'general_a': 'general', 'general_b': 'general', 'warm': 'warm_leads',
+};
+
+export function normalizeSegment(seg: string | null): string {
+  if (!seg) return 'unknown';
+  const lower = seg.toLowerCase().trim();
+  return SEGMENT_MAP[lower] ?? lower;
+}
+
+// ── Product Classification ─────────────────────────────────────────────────
+
+export function classifyProduct(campaignName: string, _tags: string[]): string {
+  const upper = campaignName.toUpperCase();
+  if (upper.includes('ERC')) return 'ERC';
+  if (upper.includes('SECTION 125') || upper.includes('S125')) return 'S125';
+  return 'FUNDING';
+}
+
+// ── Segment From Campaign Name ─────────────────────────────────────────────
+// Parses segment from campaign name when no custom tag is available.
+// Patterns: "ON - Pair 5 - British (CARLOS)" → "british"
+//           "OFF - Pair 1 - Angels - Bars (LEO)" → "angels_bars"
+//           "ON - A - CEO - LAUTARO 1" → "ceo"
+
+export function classifySegmentFromName(campaignName: string): string | null {
+  let name = campaignName
+    .replace(/^(ON|OFF)\s*-\s*/i, '')    // strip ON/OFF prefix
+    .replace(/^Pair\s*\d+\s*-\s*/i, '')  // strip "Pair N - "
+    .replace(/^[A-B]\s*-\s*/i, '')        // strip single-letter "A - " prefix
+    .replace(/\s*\([^)]+\)\s*$/i, '')     // strip trailing "(CM_NAME)"
+    .replace(/\s*(RB|X)\s*$/i, '')        // strip trailing RB/X markers
+    .trim();
+  if (!name) return null;
+  return name.toLowerCase().replace(/\s*-\s*/g, '_').replace(/\s+/g, '_');
+}
+
+// ── Infra Type ─────────────────────────────────────────────────────────────
+
+export function deriveInfraType(workspaceSlug: string): 'outlook' | 'google' {
+  return workspaceSlug.startsWith('outlook') ? 'outlook' : 'google';
+}
+
+// ── Workspace CM Defaults ──────────────────────────────────────────────────
+
 /**
  * Workspace slug → default CM name fallback.
  * Used only when parseCmName returns null.

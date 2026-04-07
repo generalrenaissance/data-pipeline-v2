@@ -1,0 +1,59 @@
+name: Data Pipeline Sync
+
+on:
+  schedule:
+    - cron: '0 0,12-23 * * *'   # hourly 12:00-23:00 UTC (7am-6pm ET)
+    - cron: '0 2,4,6,8,10 * * *' # even hours 02:00-10:00 UTC (9pm-5am ET)
+    - cron: '30 10 * * *'         # inbox run 10:30 UTC (5:30am ET)
+  workflow_dispatch:
+    inputs:
+      workspaces:
+        description: 'Comma-separated workspace slugs (leave blank for all)'
+        required: false
+        default: ''
+      type:
+        description: 'Run type: full or inbox'
+        required: false
+        default: 'full'
+
+jobs:
+  sync:
+    name: Sync Instantly → Supabase
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Determine run type from cron
+        id: runtype
+        run: |
+          # workflow_dispatch: use the type input
+          # Scheduled inbox cron (30 10 * * *): force inbox
+          # Everything else: full
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "type=${{ github.event.inputs.type || 'full' }}" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event.schedule }}" = "30 10 * * *" ]; then
+            echo "type=inbox" >> $GITHUB_OUTPUT
+          else
+            echo "type=full" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run sync
+        run: npx tsx src/runner.ts
+        env:
+          INSTANTLY_API_KEYS: ${{ secrets.INSTANTLY_API_KEYS }}
+          SUPABASE_URL: ${{ secrets.PIPELINE_SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.PIPELINE_SUPABASE_KEY }}
+          WORKSPACE_FILTER: ${{ github.event.inputs.workspaces || '' }}
+          RUN_TYPE: ${{ steps.runtype.outputs.type }}

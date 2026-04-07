@@ -1,8 +1,8 @@
 export interface Env {
-  INSTANTLY_API_KEYS: string; // JSON: { "workspace-slug": "api-key", ... }
   SUPABASE_URL: string;
   SUPABASE_KEY: string;
   ANTHROPIC_API_KEY?: string; // wrangler secret put ANTHROPIC_API_KEY
+  // Note: INSTANTLY_API_KEYS moved to GitHub Actions secrets (not needed by CF Worker)
 }
 
 export interface Campaign {

@@ -77,4 +77,23 @@ export class SupabaseClient {
     }
     return res.json() as Promise<unknown[]>;
   }
+
+  async rpc(fn: string, params: Record<string, unknown>): Promise<unknown> {
+    const res = await fetch(`${this.url}/rest/v1/rpc/${fn}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${this.key}`,
+        'apikey': this.key,
+      },
+      body: JSON.stringify(params),
+    });
+    if (!res.ok) {
+      const err = await res.text().catch(() => '');
+      throw new Error(`Supabase rpc ${res.status} on ${fn}: ${err}`);
+    }
+    const text = await res.text();
+    if (!text || text.trim() === '') return null;
+    return JSON.parse(text);
+  }
 }
