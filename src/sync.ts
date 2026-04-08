@@ -3,11 +3,11 @@ import { SupabaseClient } from './supabase';
 import {
   classifyLeadSource,
   classifyProduct,
-  classifySegmentFromName,
+  classifyTags,
   deriveInfraType,
+  extractSegmentFromName,
   extractSignature,
   LEAD_SOURCE_TAGS,
-  normalizeSegment,
   parseCmName,
   parseRgBatchIds,
   resolveBody,
@@ -102,10 +102,10 @@ export async function syncWorkspace(
       const excludedFromAnalysis = product === 'ERC' || product === 'S125';
       const exclusionReason = excludedFromAnalysis ? `product=${product}` : null;
       const infraType = deriveInfraType(workspaceSlug);
-      // Segment: try custom tags first, fall back to campaign name parsing
-      const segmentTag = resolvedTags.find(t => !LEAD_SOURCE_TAGS.has(t)) ?? null;
-      const rawSegment = segmentTag ?? classifySegmentFromName(campaign.name);
-      const segment = normalizeSegment(rawSegment);
+      // Segment: derived from campaign name keywords only (never from tags)
+      const segment = extractSegmentFromName(campaign.name);
+      // Tag classification: split flat tags[] into typed buckets
+      const { rg_batch_tags, pair_tag, sender_tags, other_tags } = classifyTags(resolvedTags);
 
       campaignRows.push({
         campaign_id: campaign.id,
@@ -206,6 +206,10 @@ export async function syncWorkspace(
               daily_limit: (detail.daily_limit as number) ?? null,
               lead_source: leadSource,
               tags: resolvedTags.length > 0 ? resolvedTags : null,
+              rg_batch_tags: rg_batch_tags.length > 0 ? rg_batch_tags : null,
+              pair_tag,
+              sender_tags: sender_tags.length > 0 ? sender_tags : null,
+              other_tags: other_tags.length > 0 ? other_tags : null,
               excluded_from_analysis: excludedFromAnalysis,
               exclusion_reason: exclusionReason,
               step: String(stepNum),
@@ -247,6 +251,10 @@ export async function syncWorkspace(
         daily_limit: (detail.daily_limit as number) ?? null,
         lead_source: leadSource,
         tags: resolvedTags.length > 0 ? resolvedTags : null,
+        rg_batch_tags: rg_batch_tags.length > 0 ? rg_batch_tags : null,
+        pair_tag,
+        sender_tags: sender_tags.length > 0 ? sender_tags : null,
+        other_tags: other_tags.length > 0 ? other_tags : null,
         excluded_from_analysis: excludedFromAnalysis,
         exclusion_reason: exclusionReason,
         step: '__ALL__',

@@ -191,29 +191,96 @@ export function extractSignature(body: string): { body: string; signature: strin
   return { body: body.trim(), signature: '' };
 }
 
-// ── Segment Normalization ──────────────────────────────────────────────────
+// ── Segment Extraction from Campaign Name ─────────────────────────────────
+// Keyword-based extraction. First match wins. NULL if no match.
+// Do NOT derive segment from Instantly tags — they are batch/infra identifiers.
 
-const SEGMENT_MAP: Record<string, string> = {
-  'mca': 'working_capital', 'shops': 'retail', 'shop': 'retail',
-  'auto': 'automotive', 'auto_repair': 'automotive',
-  'medical': 'healthcare', 'dental': 'healthcare', 'vet': 'healthcare', 'veterinary': 'healthcare',
-  'plumbing': 'home_services', 'electrical': 'home_services', 'roofing': 'home_services', 'cleaning': 'home_services',
-  'lawn': 'landscaping', 'lawn_care': 'landscaping',
-  'food': 'restaurant', 'bar': 'restaurant', 'cafe': 'restaurant',
-  'hotel': 'hospitality', 'motel': 'hospitality',
-  'gym': 'fitness', 'salon': 'beauty', 'spa': 'beauty', 'barber': 'beauty',
-  'trucking_and_logistics': 'trucking', 'logistics': 'trucking',
-  'school': 'education', 'daycare': 'education',
-  'professional_services': 'professional', 'consulting': 'professional',
-  'accounting': 'professional', 'legal': 'professional',
-  'farming': 'agriculture', 'ranch': 'agriculture',
-  'general_a': 'general', 'general_b': 'general', 'warm': 'warm_leads',
-};
+const SEGMENT_KEYWORDS: Array<[string[], string]> = [
+  [['restaurant', 'bar', 'bars', 'catering', 'dining'], 'restaurant'],
+  [['construction'], 'construction'],
+  [['cleaning'], 'cleaning'],
+  [['trucking'], 'trucking'],
+  [['hvac'], 'hvac'],
+  [['landscaping', 'lawn'], 'landscaping'],
+  [['retail', 'clothing', 'beauty', 'salon'], 'retail'],
+  [['home improvement', 'home imp'], 'home_improvement'],
+  [['advertising'], 'advertising'],
+  [['insurance'], 'insurance'],
+  [['law firm', 'law firms'], 'legal'],
+  [['auto', 'automotive'], 'automotive'],
+  [['healthcare', 'medical'], 'healthcare'],
+  [['presidents'], 'presidents'],
+  [['ceos', 'ceo'], 'ceos'],
+  [['general', 'smb owners', 'smb', 'owners', 'business owner'], 'general'],
+];
 
-export function normalizeSegment(seg: string | null): string {
-  if (!seg) return 'unknown';
-  const lower = seg.toLowerCase().trim();
-  return SEGMENT_MAP[lower] ?? lower;
+export function extractSegmentFromName(campaignName: string): string | null {
+  const lower = campaignName.toLowerCase();
+  for (const [keywords, segment] of SEGMENT_KEYWORDS) {
+    for (const kw of keywords) {
+      if (lower.includes(kw)) return segment;
+    }
+  }
+  return null;
+}
+
+// ── Tag Classification ─────────────────────────────────────────────────────
+// Splits the flat tags[] array into 4 typed buckets.
+
+const RG_TAG_RE = /^RG\d[\d-]*$/i;
+const PAIR_TAG_RE = /^(pair\s+\d+(\s+\w+)*|adonis\s+pair)$/i;
+const KD_RE = /^KD[\s\d]/i;
+const B42_RE = /^B42\./i;
+
+function toTitleCase(str: string): string {
+  return str.replace(/\w+/g, w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase());
+}
+
+export interface TagClassification {
+  rg_batch_tags: string[];
+  pair_tag: string | null;
+  sender_tags: string[];
+  other_tags: string[];
+}
+
+export function classifyTags(tags: string[]): TagClassification {
+  const rg_batch_tags: string[] = [];
+  let pair_tag: string | null = null;
+  const sender_tags: string[] = [];
+  const other_tags: string[] = [];
+
+  for (const raw of tags) {
+    const tag = raw.replace(/\t/g, ' ').trim();
+    if (!tag) continue;
+
+    if (RG_TAG_RE.test(tag)) {
+      rg_batch_tags.push(tag.toUpperCase());
+      continue;
+    }
+
+    if (PAIR_TAG_RE.test(tag)) {
+      if (!pair_tag) pair_tag = toTitleCase(tag);
+      continue;
+    }
+
+    // Sender: exactly two Title-cased words, not a known non-name pattern
+    const parts = tag.split(/\s+/);
+    if (
+      parts.length === 2 &&
+      /^[A-Z][a-z]+$/.test(parts[0]) &&
+      /^[A-Z][a-z]+$/.test(parts[1]) &&
+      !KD_RE.test(tag) &&
+      !B42_RE.test(tag) &&
+      !LEAD_SOURCE_TAGS.has(tag)
+    ) {
+      sender_tags.push(tag);
+      continue;
+    }
+
+    other_tags.push(tag);
+  }
+
+  return { rg_batch_tags, pair_tag, sender_tags, other_tags };
 }
 
 // ── Product Classification ─────────────────────────────────────────────────
@@ -223,24 +290,6 @@ export function classifyProduct(campaignName: string, _tags: string[]): string {
   if (upper.includes('ERC')) return 'ERC';
   if (upper.includes('SECTION 125') || upper.includes('S125')) return 'S125';
   return 'FUNDING';
-}
-
-// ── Segment From Campaign Name ─────────────────────────────────────────────
-// Parses segment from campaign name when no custom tag is available.
-// Patterns: "ON - Pair 5 - British (CARLOS)" → "british"
-//           "OFF - Pair 1 - Angels - Bars (LEO)" → "angels_bars"
-//           "ON - A - CEO - LAUTARO 1" → "ceo"
-
-export function classifySegmentFromName(campaignName: string): string | null {
-  let name = campaignName
-    .replace(/^(ON|OFF)\s*-\s*/i, '')    // strip ON/OFF prefix
-    .replace(/^Pair\s*\d+\s*-\s*/i, '')  // strip "Pair N - "
-    .replace(/^[A-B]\s*-\s*/i, '')        // strip single-letter "A - " prefix
-    .replace(/\s*\([^)]+\)\s*$/i, '')     // strip trailing "(CM_NAME)"
-    .replace(/\s*(RB|X)\s*$/i, '')        // strip trailing RB/X markers
-    .trim();
-  if (!name) return null;
-  return name.toLowerCase().replace(/\s*-\s*/g, '_').replace(/\s+/g, '_');
 }
 
 // ── Infra Type ─────────────────────────────────────────────────────────────
