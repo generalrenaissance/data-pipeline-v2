@@ -224,6 +224,10 @@ export async function syncWorkspace(
               replies: replied,
               opportunities,
               leads_contacted: null, // campaign-level only
+              total_leads: null,
+              leads_completed: null,
+              leads_bounced: null,
+              leads_unsubscribed: null,
               e_op: opportunities > 0 ? Math.round((sent / opportunities) * 100) / 100 : null,
               reply_rate: sent > 0 ? Math.round((replied / sent) * 1000000) / 1000000 : null,
               synced_at: now,
