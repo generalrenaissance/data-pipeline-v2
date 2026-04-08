@@ -51,15 +51,13 @@ export class InstantlyClient {
 
   /** Campaign-level aggregate stats */
   async getCampaignAnalytics(campaignId: string): Promise<CampaignAnalytics> {
-    const raw = await this.get<Record<string, unknown>>('/campaigns/analytics', {
-      campaign_id: campaignId,
+    const raw = await this.get<unknown[]>('/campaigns/analytics', {
+      id: campaignId,
     });
-    const c = Array.isArray((raw as any).campaigns)
-      ? ((raw as any).campaigns[0] ?? {})
-      : raw;
+    const c: any = Array.isArray(raw) ? (raw[0] ?? {}) : raw;
     return {
       leads_count: (c.leads_count as number) ?? 0,
-      contacted_count: (c.contacted_count as number) ?? 0,
+      contacted_count: (c.new_leads_contacted_count as number) ?? 0,
       completed_count: (c.completed_count as number) ?? 0,
       bounced_count: (c.bounced_count as number) ?? 0,
       unsubscribed_count: (c.unsubscribed_count as number) ?? 0,
