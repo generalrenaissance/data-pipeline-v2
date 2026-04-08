@@ -227,6 +227,44 @@ export async function syncWorkspace(
           });
         });
       }
+
+      // V3: campaign-level __ALL__ row — aggregate across all variants
+      const totalSent = steps.reduce((sum, s) => sum + (s.sent ?? 0), 0);
+      const totalReplied = steps.reduce((sum, s) => sum + (s.replies ?? 0), 0);
+      const totalOpps = steps.reduce((sum, s) => sum + (s.opportunities ?? 0), 0);
+
+      campaignDataRows.push({
+        campaign_id: campaign.id,
+        campaign_name: campaign.name,
+        workspace_id: workspaceSlug,
+        workspace_name: workspaceSlug,
+        cm_name: cmName,
+        segment,
+        product,
+        infra_type: infraType,
+        status: campaignStatus,
+        date_launched: detail.timestamp_created ?? null,
+        daily_limit: (detail.daily_limit as number) ?? null,
+        lead_source: leadSource,
+        tags: resolvedTags.length > 0 ? resolvedTags : null,
+        excluded_from_analysis: excludedFromAnalysis,
+        exclusion_reason: exclusionReason,
+        step: '__ALL__',
+        variant: '__ALL__',
+        subject: null,
+        body: null,
+        subject_preview: null,
+        body_preview: null,
+        signature: null,
+        v_disabled: false,
+        emails_sent: totalSent,
+        replies: totalReplied,
+        opportunities: totalOpps,
+        leads_contacted: analytics.contacted_count ?? null,
+        e_op: totalOpps > 0 ? Math.round((totalSent / totalOpps) * 100) / 100 : null,
+        reply_rate: totalSent > 0 ? Math.round((totalReplied / totalSent) * 1000000) / 1000000 : null,
+        synced_at: now,
+      });
     } catch (err) {
       console.error(`[sync] Error on campaign ${campaign.id} (${campaign.name}):`, err);
     }
