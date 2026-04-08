@@ -23,7 +23,6 @@ const repoRoot = path.resolve(__dirname, '..');
 loadDotenv(process.env.DOTENV_PATH ?? path.join(repoRoot, '.env'));
 
 async function main() {
-  // Accept SLACK_TOKEN or fall back to SUPABASE_URL/KEY naming from the pipeline .env
   const slackToken = process.env.SLACK_TOKEN;
   const slackCookie = process.env.SLACK_COOKIE;
   const supabaseUrl = process.env.PIPELINE_SUPABASE_URL ?? process.env.SUPABASE_URL;
