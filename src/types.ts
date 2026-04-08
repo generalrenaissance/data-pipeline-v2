@@ -72,13 +72,6 @@ export interface Tag {
   organization_id: string;
 }
 
-export interface TagMapping {
-  id: string;
-  tag_id: string;
-  resource_id: string;
-  resource_type: number;
-}
-
 export interface WebhookPayload {
   event_type: string;
   campaign_id: string;

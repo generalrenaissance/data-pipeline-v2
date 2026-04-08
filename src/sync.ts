@@ -67,26 +67,8 @@ export async function syncWorkspace(
     return;
   }
 
-  // Build tag map + fetch only lead source tag→campaign mappings
+  // Build tag map (UUID → label) for resolving per-campaign tags
   const tagMap = await client.getTagMap();
-
-  // Find lead source tag IDs (targeted fetch instead of all mappings)
-  const leadSourceEntries = [...tagMap].filter(([_, label]) => LEAD_SOURCE_TAGS.has(label));
-
-  let campaignCustomTags = new Map<string, string[]>();
-  try {
-    for (const [tagId, label] of leadSourceEntries) {
-      const mappings = await client.getCustomTagMappingsByTag(tagId);
-      for (const m of mappings) {
-        const existing = campaignCustomTags.get(m.resource_id) ?? [];
-        existing.push(label);
-        campaignCustomTags.set(m.resource_id, existing);
-      }
-    }
-    console.log(`[tags] ${workspaceSlug}: ${leadSourceEntries.length} lead source tags, ${campaignCustomTags.size} campaigns tagged`);
-  } catch (err) {
-    console.error(`[tags] ${workspaceSlug}: custom tag fetch failed, continuing without lead_source:`, err);
-  }
 
   // List all campaigns
   const campaigns = await client.getCampaigns();
@@ -112,8 +94,7 @@ export async function syncWorkspace(
         .map(id => tagMap.get(id))
         .filter(Boolean) as string[];
       const rgBatchIds = parseRgBatchIds(campaign.name);
-      const customTags = campaignCustomTags.get(campaign.id) ?? [];
-      const leadSource = classifyLeadSource(customTags);
+      const leadSource = classifyLeadSource(resolvedTags);
       const campaignStatus = String(detail.status ?? campaign.status ?? '');
 
       // V3 derived fields
@@ -122,7 +103,7 @@ export async function syncWorkspace(
       const exclusionReason = excludedFromAnalysis ? `product=${product}` : null;
       const infraType = deriveInfraType(workspaceSlug);
       // Segment: try custom tags first, fall back to campaign name parsing
-      const segmentTag = customTags.find(t => !LEAD_SOURCE_TAGS.has(t)) ?? null;
+      const segmentTag = resolvedTags.find(t => !LEAD_SOURCE_TAGS.has(t)) ?? null;
       const rawSegment = segmentTag ?? classifySegmentFromName(campaign.name);
       const segment = normalizeSegment(rawSegment);
 

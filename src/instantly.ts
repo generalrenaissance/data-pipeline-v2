@@ -1,4 +1,4 @@
-import type { Campaign, StepAnalytics, CampaignAnalytics, Account, Tag, TagMapping } from './types';
+import type { Campaign, StepAnalytics, CampaignAnalytics, Account, Tag } from './types';
 
 export class InstantlyClient {
   private baseUrl = 'https://api.instantly.ai/api/v2';
@@ -89,8 +89,4 @@ export class InstantlyClient {
     return new Map(tags.map(t => [t.id, t.label]));
   }
 
-  /** Custom tag → campaign mappings for a specific tag (resource_type=2 = campaigns) */
-  async getCustomTagMappingsByTag(tagId: string): Promise<TagMapping[]> {
-    return this.getAll<TagMapping>('/custom-tag-mappings', { resource_type: '2', tag_id: tagId });
-  }
 }
