@@ -13,13 +13,14 @@ export async function syncMeetingsBooked(
   slackToken: string,
   supabaseUrl: string,
   supabaseKey: string,
+  slackCookie?: string,
 ): Promise<void> {
   const db = new SupabaseClient(supabaseUrl, supabaseKey);
   const oldest = Math.floor((Date.now() - LOOKBACK_HOURS * 3600_000) / 1000).toString();
 
   for (const channel of CHANNELS) {
     try {
-      const rows = await fetchChannel(slackToken, channel.id, channel.name, oldest);
+      const rows = await fetchChannel(slackToken, channel.id, channel.name, oldest, slackCookie);
       if (rows.length === 0) {
         console.log(`[slack-sync] ${channel.name}: 0 rows`);
         continue;
@@ -37,6 +38,7 @@ async function fetchChannel(
   channelId: string,
   channelName: string,
   oldest: string,
+  cookie?: string,
 ): Promise<unknown[]> {
   const rows: unknown[] = [];
   let cursor: string | undefined;
@@ -45,9 +47,9 @@ async function fetchChannel(
     const params = new URLSearchParams({ channel: channelId, oldest, limit: '200', inclusive: 'true' });
     if (cursor) params.set('cursor', cursor);
 
-    const res = await fetch(`https://slack.com/api/conversations.history?${params}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
+    const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
+    if (cookie) headers['Cookie'] = `d=${cookie}`;
+    const res = await fetch(`https://slack.com/api/conversations.history?${params}`, { headers });
     const data: any = await res.json();
 
     if (!data.ok) throw new Error(`Slack API error: ${data.error}`);

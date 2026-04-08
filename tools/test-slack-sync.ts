@@ -25,6 +25,7 @@ loadDotenv(process.env.DOTENV_PATH ?? path.join(repoRoot, '.env'));
 async function main() {
   // Accept SLACK_TOKEN or fall back to SUPABASE_URL/KEY naming from the pipeline .env
   const slackToken = process.env.SLACK_TOKEN;
+  const slackCookie = process.env.SLACK_COOKIE;
   const supabaseUrl = process.env.PIPELINE_SUPABASE_URL ?? process.env.SUPABASE_URL;
   const supabaseKey = process.env.PIPELINE_SUPABASE_KEY ?? process.env.SUPABASE_KEY;
 
@@ -37,7 +38,7 @@ async function main() {
     process.exit(1);
   }
 
-  await syncMeetingsBooked(slackToken, supabaseUrl, supabaseKey);
+  await syncMeetingsBooked(slackToken, supabaseUrl, supabaseKey, slackCookie);
   console.log('Done.');
 }
 
