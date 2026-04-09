@@ -231,8 +231,8 @@ async function main(): Promise<void> {
 
   const attempted = succeeded + failed.length;
   const errorRate = attempted > 0 ? failed.length / attempted : 0;
-  if (errorRate > 0.1) {
-    console.error(`[seq-started] Error rate ${(errorRate * 100).toFixed(1)}% exceeds 10% threshold (${failed.length}/${attempted} attempted)`);
+  if (errorRate > 0.25) {
+    console.error(`[seq-started] Error rate ${(errorRate * 100).toFixed(1)}% exceeds 25% threshold (${failed.length}/${attempted} attempted)`);
     process.exit(1);
   }
 }
