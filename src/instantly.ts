@@ -12,13 +12,13 @@ export class InstantlyClient {
     }
     let res = await fetch(url.toString(), {
       headers: { Authorization: `Bearer ${this.apiKey}` },
-      signal: AbortSignal.timeout(15_000),
+      signal: AbortSignal.timeout(30_000),
     });
     if (res.status === 429) {
       await new Promise(r => setTimeout(r, 2000));
       res = await fetch(url.toString(), {
         headers: { Authorization: `Bearer ${this.apiKey}` },
-        signal: AbortSignal.timeout(15_000),
+        signal: AbortSignal.timeout(30_000),
       });
     }
     if (!res.ok) {
