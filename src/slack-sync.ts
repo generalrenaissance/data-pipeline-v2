@@ -31,6 +31,15 @@ export async function syncMeetingsBooked(
       console.error(`[slack-sync] ${channel.name}: error`, err);
     }
   }
+
+  // Match newly inserted rows to campaigns
+  await matchUnmatchedRows(db);
+}
+
+async function matchUnmatchedRows(db: SupabaseClient): Promise<void> {
+  const pass1 = await db.rpc('match_meetings_exact', {});
+  const pass2 = await db.rpc('match_meetings_normalized', {});
+  console.log(`[slack-sync] Matching: ${pass1} exact, ${pass2} normalized`);
 }
 
 async function fetchChannel(
@@ -80,26 +89,18 @@ async function fetchChannel(
 }
 
 function parseMeetingBookedLine(line: string): {
-  seq_num: number | null; qualified: 'ON' | 'OFF' | null;
-  campaign_ref: string | null; cm_name: string | null;
+  booking_number: number | null;
+  campaign_name_raw: string | null;
 } | null {
   if (!/meeting\s+booke?d?\s+\d+/i.test(line)) return null;
 
   const seqMatch = line.match(/meeting\s+booke?d?\s+(\d+)/i);
-  const seq_num = seqMatch ? parseInt(seqMatch[1], 10) : null;
+  const booking_number = seqMatch ? parseInt(seqMatch[1], 10) : null;
 
-  let rest = line.replace(/.*meeting\s+booke?d?\s+\d+\s*[-–]?\s*/i, '').trim();
+  // Strip "Meeting Booked 123 - " prefix, keep everything else intact
+  const campaign_name_raw = line
+    .replace(/.*meeting\s+booke?d?\s+\d+\s*[-–]?\s*/i, '')
+    .trim() || null;
 
-  let qualified: 'ON' | 'OFF' | null = null;
-  if (/^ON\b/i.test(rest)) { qualified = 'ON'; rest = rest.replace(/^ON\s*[-–]?\s*/i, '').trim(); }
-  else if (/^OFF\b/i.test(rest)) { qualified = 'OFF'; rest = rest.replace(/^OFF\s*[-–]?\s*/i, '').trim(); }
-
-  const parenMatches = [...rest.matchAll(/\(([^)]+)\)/g)];
-  const validParens = parenMatches.filter(m => !/^copy$/i.test(m[1].trim()));
-  const cm_name = validParens.length > 0 ? validParens[validParens.length - 1][1].trim() : null;
-
-  const lastParenIdx = cm_name ? rest.lastIndexOf(`(${cm_name}`) : rest.length;
-  const campaign_ref = rest.slice(0, lastParenIdx).replace(/[-\s–]+$/, '').trim() || null;
-
-  return { seq_num, qualified, campaign_ref, cm_name };
+  return { booking_number, campaign_name_raw };
 }
