@@ -40,6 +40,10 @@ async function matchUnmatchedRows(db: SupabaseClient): Promise<void> {
   const pass1 = await db.rpc('match_meetings_exact', {});
   const pass2 = await db.rpc('match_meetings_normalized', {});
   console.log(`[slack-sync] Matching: ${pass1} exact, ${pass2} normalized`);
+
+  // Rollup matched counts into campaign_data.meetings_booked
+  const rolled = await db.rpc('rollup_meetings_booked', {});
+  console.log(`[slack-sync] Rollup: ${rolled} campaign_data rows updated`);
 }
 
 async function fetchChannel(
