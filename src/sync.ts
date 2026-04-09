@@ -68,10 +68,22 @@ export async function syncWorkspace(
   }
 
   // Build tag map (UUID → label) for resolving per-campaign tags
-  const tagMap = await client.getTagMap();
+  let tagMap: Map<string, string>;
+  try {
+    tagMap = await client.getTagMap();
+  } catch (err) {
+    console.warn(`[sync] ${workspaceSlug}: getTagMap failed, continuing without tags:`, err);
+    tagMap = new Map();
+  }
 
-  // List all campaigns
-  const campaigns = await client.getCampaigns();
+  // List all campaigns — retry once on timeout
+  let campaigns: Awaited<ReturnType<typeof client.getCampaigns>>;
+  try {
+    campaigns = await client.getCampaigns();
+  } catch (err) {
+    console.warn(`[sync] ${workspaceSlug}: getCampaigns failed, retrying once...`);
+    campaigns = await client.getCampaigns();
+  }
 
   const campaignRows: unknown[] = [];
   const variantCopyRows: unknown[] = [];
