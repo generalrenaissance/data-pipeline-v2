@@ -1,0 +1,30 @@
+name: Sequence Started Sync (GH Test)
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  sync:
+    name: Sync sequence_started_gh
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run sequence started sync (GH test)
+        run: npx tsx scripts/sync-sequence-started-gh.ts
+        env:
+          INSTANTLY_API_KEYS: ${{ secrets.INSTANTLY_API_KEYS }}
+          PIPELINE_SUPABASE_URL: ${{ secrets.PIPELINE_SUPABASE_URL }}
+          PIPELINE_SUPABASE_KEY: ${{ secrets.PIPELINE_SUPABASE_KEY }}
