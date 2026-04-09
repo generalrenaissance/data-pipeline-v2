@@ -22,6 +22,7 @@ const {
 const CONCURRENCY = 10; // Low — each campaign paginates many pages
 const UPSERT_BATCH_SIZE = 50;
 const PAGE_SIZE = 100;
+const FETCH_TIMEOUT_MS = 30_000; // 30s per request — don't hang forever
 
 // ---------------------------------------------------------------------------
 // Types
@@ -30,6 +31,11 @@ const PAGE_SIZE = 100;
 interface CampaignRow {
   workspace_id: string;
   campaign_id: string;
+}
+
+/** Normalize "Renaissance 6" → "renaissance-6" to match API key map */
+function toSlug(ws: string): string {
+  return ws.toLowerCase().replace(/\s+/g, '-');
 }
 
 interface SequenceStartedRow {
@@ -50,7 +56,7 @@ async function countContactedLeads(
 
   while (true) {
     const body: Record<string, unknown> = {
-      campaign_id: campaignId,
+      campaign: campaignId,
       filter: 'FILTER_VAL_CONTACTED',
       limit: PAGE_SIZE,
     };
@@ -63,6 +69,7 @@ async function countContactedLeads(
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
 
     if (!res.ok) {
@@ -191,7 +198,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  const noKey = [...new Set(campaigns.map((c) => c.workspace_id))].filter((ws) => !keyMap[ws]);
+  const noKey = [...new Set(campaigns.map((c) => c.workspace_id))].filter((ws) => !keyMap[toSlug(ws)]);
   if (noKey.length > 0) {
     console.warn(`[seq-started] WARNING: No API key for workspace(s): ${noKey.join(', ')}`);
   }
@@ -202,7 +209,7 @@ async function main(): Promise<void> {
   let totalPages = 0;
 
   await withConcurrency(campaigns, CONCURRENCY, async (campaign) => {
-    const apiKey = keyMap[campaign.workspace_id];
+    const apiKey = keyMap[toSlug(campaign.workspace_id)];
     if (!apiKey) {
       skipped.push(campaign.campaign_id);
       return;
