@@ -1,0 +1,46 @@
+name: Conversation Messages Sync
+
+on:
+  schedule:
+    - cron: '0 */4 * * *'    # every 4 hours
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Sync mode: incremental or full'
+        required: false
+        default: 'incremental'
+        type: choice
+        options:
+          - incremental
+          - full
+      workspace:
+        description: 'Single workspace slug (leave empty for all)'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - name: Run conversation messages sync
+        run: |
+          ARGS=""
+          if [ "${{ inputs.mode }}" = "full" ]; then
+            ARGS="--full"
+          fi
+          if [ -n "${{ inputs.workspace }}" ]; then
+            ARGS="$ARGS --ws ${{ inputs.workspace }}"
+          fi
+          npx tsx tools/conversation-messages-sync.ts $ARGS
+        env:
+          PIPELINE_SUPABASE_URL: ${{ secrets.PIPELINE_SUPABASE_URL }}
+          PIPELINE_SUPABASE_KEY: ${{ secrets.PIPELINE_SUPABASE_KEY }}
+          INSTANTLY_API_KEYS: ${{ secrets.INSTANTLY_API_KEYS }}
