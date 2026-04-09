@@ -141,26 +141,42 @@ async function fetchEmails(
 
   const maxRetries = 3;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    const res = await fetch(url.toString(), {
-      headers: { Authorization: `Bearer ${apiKey}` },
-      signal: AbortSignal.timeout(60_000),
-    });
+    try {
+      const start = Date.now();
+      const res = await fetch(url.toString(), {
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'User-Agent': 'Renaissance-DataPipeline/2.0',
+        },
+        signal: AbortSignal.timeout(60_000),
+      });
+      const elapsed = ((Date.now() - start) / 1000).toFixed(1);
 
-    // Instantly returns 403 (not 429) for rate limits
-    if ((res.status === 429 || res.status === 403) && attempt < maxRetries) {
-      const wait = 5000 * Math.pow(2, attempt); // 5s, 10s, 20s
-      console.log(`  Rate limited (${res.status}), waiting ${wait / 1000}s (attempt ${attempt + 1}/${maxRetries})...`);
-      await new Promise(r => setTimeout(r, wait));
-      continue;
+      // Instantly returns 403 (not 429) for rate limits
+      if ((res.status === 429 || res.status === 403) && attempt < maxRetries) {
+        const wait = 5000 * Math.pow(2, attempt); // 5s, 10s, 20s
+        console.log(`  Rate limited (${res.status}, ${elapsed}s), waiting ${wait / 1000}s (attempt ${attempt + 1}/${maxRetries})...`);
+        await new Promise(r => setTimeout(r, wait));
+        continue;
+      }
+
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        throw new Error(`Instantly ${res.status}: ${body}`);
+      }
+
+      const data: any = await res.json();
+      return { items: data.items ?? [], nextCursor: data.next_starting_after ?? undefined };
+    } catch (err: any) {
+      const isTimeout = err.name === 'TimeoutError' || err.name === 'AbortError' || err.message?.includes('timeout');
+      if (isTimeout && attempt < maxRetries) {
+        const wait = 10_000 * Math.pow(2, attempt); // 10s, 20s, 40s
+        console.log(`  Timeout on attempt ${attempt + 1}, waiting ${wait / 1000}s before retry...`);
+        await new Promise(r => setTimeout(r, wait));
+        continue;
+      }
+      throw err;
     }
-
-    if (!res.ok) {
-      const body = await res.text().catch(() => '');
-      throw new Error(`Instantly ${res.status}: ${body}`);
-    }
-
-    const data: any = await res.json();
-    return { items: data.items ?? [], nextCursor: data.next_starting_after ?? undefined };
   }
 
   throw new Error('Instantly: max retries exceeded');
