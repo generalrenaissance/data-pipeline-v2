@@ -143,7 +143,7 @@ async function fetchEmails(
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     const res = await fetch(url.toString(), {
       headers: { Authorization: `Bearer ${apiKey}` },
-      signal: AbortSignal.timeout(30_000),
+      signal: AbortSignal.timeout(60_000),
     });
 
     // Instantly returns 403 (not 429) for rate limits
@@ -182,7 +182,10 @@ export async function syncWorkspace(
   options: SyncOptions = {},
 ): Promise<{ rows: number; pages: number; stopped: string }> {
   const maxPages = options.maxPages ?? 2000;
+  console.log(`  [${workspaceSlug}] Fetching last message timestamp...`);
   const lastMessageTs = options.full ? null : await getLastMessageTimestamp(db, workspaceSlug);
+  console.log(`  [${workspaceSlug}] Last message timestamp: ${lastMessageTs ?? 'none (first sync)'}`);
+  console.log(`  [${workspaceSlug}] Starting pagination...`);
 
   let cursor: string | undefined;
   let totalRows = 0;
