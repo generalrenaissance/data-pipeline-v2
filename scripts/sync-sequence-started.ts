@@ -107,32 +107,27 @@ async function pipelineSelect<T>(table: string, query: string): Promise<T[]> {
   return res.json() as Promise<T[]>;
 }
 
-async function pipelineUpsertBatch(rows: SequenceStartedRow[]): Promise<void> {
-  for (let i = 0; i < rows.length; i += UPSERT_BATCH_SIZE) {
-    const chunk = rows.slice(i, i + UPSERT_BATCH_SIZE);
-    const payload = chunk.map((r) => ({
-      campaign_id: r.campaign_id,
-      step: '__ALL__',
-      variant: '__ALL__',
-      sequence_started: r.sequence_started,
-    }));
-    const res = await fetch(
-      `${PIPELINE_SUPABASE_URL}/rest/v1/campaign_data?on_conflict=campaign_id,step,variant`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${PIPELINE_SUPABASE_KEY}`,
-          apikey: PIPELINE_SUPABASE_KEY!,
-          Prefer: 'resolution=merge-duplicates,return=minimal',
-        },
-        body: JSON.stringify(payload),
+async function pipelineUpsertOne(row: SequenceStartedRow): Promise<void> {
+  const res = await fetch(
+    `${PIPELINE_SUPABASE_URL}/rest/v1/campaign_data?on_conflict=campaign_id,step,variant`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${PIPELINE_SUPABASE_KEY}`,
+        apikey: PIPELINE_SUPABASE_KEY!,
+        Prefer: 'resolution=merge-duplicates,return=minimal',
       },
-    );
-    if (!res.ok) {
-      throw new Error(`Pipeline Supabase upsert failed ${res.status}: ${await res.text()}`);
-    }
-    console.log(`[seq-started] Upserted batch of ${chunk.length} rows`);
+      body: JSON.stringify([{
+        campaign_id: row.campaign_id,
+        step: '__ALL__',
+        variant: '__ALL__',
+        sequence_started: row.sequence_started,
+      }]),
+    },
+  );
+  if (!res.ok) {
+    throw new Error(`Pipeline Supabase upsert failed ${res.status}: ${await res.text()}`);
   }
 }
 
@@ -203,7 +198,7 @@ async function main(): Promise<void> {
     console.warn(`[seq-started] WARNING: No API key for workspace(s): ${noKey.join(', ')}`);
   }
 
-  const results: SequenceStartedRow[] = [];
+  let succeeded = 0;
   const failed: string[] = [];
   const skipped: string[] = [];
   let totalPages = 0;
@@ -217,28 +212,24 @@ async function main(): Promise<void> {
 
     try {
       const count = await countContactedLeads(campaign.campaign_id, apiKey);
-      results.push({
-        campaign_id: campaign.campaign_id,
-        sequence_started: count,
-      });
-      totalPages += Math.max(1, Math.ceil(count / PAGE_SIZE));
+      const pages = Math.max(1, Math.ceil(count / PAGE_SIZE));
+      totalPages += pages;
+      await pipelineUpsertOne({ campaign_id: campaign.campaign_id, sequence_started: count });
+      succeeded++;
+      console.log(`[seq-started] OK ${campaign.workspace_id}/${campaign.campaign_id.slice(0,8)}: ${count} contacted (${pages} pages) [${succeeded + failed.length + skipped.length}/${campaigns.length}]`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[seq-started] FAIL ${campaign.workspace_id}/${campaign.campaign_id}: ${msg}`);
+      console.error(`[seq-started] FAIL ${campaign.workspace_id}/${campaign.campaign_id.slice(0,8)}: ${msg}`);
       failed.push(campaign.campaign_id);
     }
   });
 
-  // Single flush after all pagination is done — no race condition
-  console.log(`[seq-started] Pagination complete. Upserting ${results.length} rows...`);
-  await pipelineUpsertBatch(results);
-
   const elapsed = Math.round((Date.now() - startMs) / 1000);
-  console.log(`[seq-started] Results: ${results.length} ok, ${failed.length} failed, ${skipped.length} skipped (no key)`);
+  console.log(`[seq-started] Results: ${succeeded} ok, ${failed.length} failed, ${skipped.length} skipped (no key)`);
   console.log(`[seq-started] Total pages fetched: ~${totalPages}`);
   console.log(`[seq-started] Done in ${elapsed}s`);
 
-  const attempted = results.length + failed.length;
+  const attempted = succeeded + failed.length;
   const errorRate = attempted > 0 ? failed.length / attempted : 0;
   if (errorRate > 0.1) {
     console.error(`[seq-started] Error rate ${(errorRate * 100).toFixed(1)}% exceeds 10% threshold (${failed.length}/${attempted} attempted)`);
