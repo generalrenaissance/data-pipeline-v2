@@ -2,7 +2,7 @@ name: Meetings Booked Slack Sync
 
 on:
   schedule:
-    - cron: '0 */4 * * *'    # every 4 hours
+    - cron: '0 5 * * *'       # daily at 12 AM ET (5 AM UTC)
   workflow_dispatch:
 
 jobs:
