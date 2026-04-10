@@ -1,4 +1,4 @@
-import type { Campaign, StepAnalytics, CampaignAnalytics, Account, Tag } from './types';
+import type { Campaign, StepAnalytics, CampaignAnalytics, Account, Tag, TagMapping } from './types';
 
 export class InstantlyClient {
   private baseUrl = 'https://api.instantly.ai/api/v2';
@@ -89,4 +89,19 @@ export class InstantlyClient {
     return new Map(tags.map(t => [t.id, t.label]));
   }
 
+  /**
+   * Fetch ALL custom-tag-mappings for this workspace (unfiltered).
+   * IMPORTANT: Instantly's resource_type/resource_id/tag_id filters on this
+   * endpoint are broken — they're ignored or partially honored (verified
+   * empirically 2026-04-10). Always fetch unfiltered, then filter client-side
+   * on resource_type === 2 (= campaigns, determined empirically).
+   *
+   * Page size is capped at 100 server-side: Instantly returns HTTP 400
+   * "querystring/limit must be <= 100" for any higher value. Large
+   * workspaces (koi-and-destroy has ~72k mappings) paginate to hundreds of
+   * sequential subrequests — budget accordingly at the caller.
+   */
+  async getAllCustomTagMappings(): Promise<TagMapping[]> {
+    return this.getAll<TagMapping>('/custom-tag-mappings');
+  }
 }

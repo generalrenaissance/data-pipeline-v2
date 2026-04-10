@@ -76,6 +76,32 @@ export async function syncWorkspace(
     tagMap = new Map();
   }
 
+  // Fetch ALL custom-tag-mappings ONCE, filter client-side to campaigns.
+  // /custom-tag-mappings is the authoritative source of applied tags.
+  // email_tag_list is a legacy/secondary field that some teams still populate;
+  // many workspaces (e.g. koi-and-destroy) have tags only in the mapping
+  // endpoint, so without this fetch lead_source is empty for most campaigns.
+  // Instantly's filters on this endpoint are broken — must fetch unfiltered.
+  const campaignTagsFromMappings = new Map<string, string[]>();
+  try {
+    const allMappings = await client.getAllCustomTagMappings();
+    const campaignMappings = allMappings.filter(m => m.resource_type === 2);
+    for (const m of campaignMappings) {
+      const label = tagMap.get(m.tag_id);
+      if (!label) continue; // orphan mapping (tag deleted but mapping lingers)
+      const existing = campaignTagsFromMappings.get(m.resource_id) ?? [];
+      existing.push(label);
+      campaignTagsFromMappings.set(m.resource_id, existing);
+    }
+    console.log(
+      `[tags] ${workspaceSlug}: ${allMappings.length} total mappings, ` +
+      `${campaignMappings.length} campaign mappings, ` +
+      `${campaignTagsFromMappings.size} campaigns tagged`
+    );
+  } catch (err) {
+    console.warn(`[sync] ${workspaceSlug}: getAllCustomTagMappings failed, falling back to email_tag_list only:`, err);
+  }
+
   // List all campaigns — retry once on timeout
   let campaigns: Awaited<ReturnType<typeof client.getCampaigns>>;
   try {
@@ -102,9 +128,14 @@ export async function syncWorkspace(
 
       const cmName =
         parseCmName(campaign.name) ?? WORKSPACE_CM_DEFAULTS[workspaceSlug] ?? null;
-      const resolvedTags = (detail.email_tag_list ?? [])
+      // Merge legacy email_tag_list with authoritative custom-tag-mappings.
+      // email_tag_list is a sparse secondary field; /custom-tag-mappings is
+      // the source of truth for applied tags.
+      const legacyTags = (detail.email_tag_list ?? [])
         .map(id => tagMap.get(id))
         .filter(Boolean) as string[];
+      const mappingTags = campaignTagsFromMappings.get(campaign.id) ?? [];
+      const resolvedTags = Array.from(new Set([...legacyTags, ...mappingTags]));
       const rgBatchIds = parseRgBatchIds(campaign.name);
       const leadSource = classifyLeadSource(resolvedTags);
       const campaignStatus = String(detail.status ?? campaign.status ?? '');
