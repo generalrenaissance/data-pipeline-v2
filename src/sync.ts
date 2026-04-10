@@ -111,11 +111,11 @@ export async function syncWorkspace(
     campaigns = await client.getCampaigns();
   }
 
-  const campaignRows: unknown[] = [];
-  const variantCopyRows: unknown[] = [];
+  // metricsRows feeds campaign_metrics_daily — the time-series archive,
+  // retained as the only source of dated snapshots for trend analysis.
   const metricsRows: unknown[] = [];
 
-  // V3: campaign_data rows (one per variant)
+  // V3: campaign_data rows (one per variant + __ALL__ rollup)
   const campaignDataRows: unknown[] = [];
 
   await runWithConcurrency(campaigns, CAMPAIGN_CONCURRENCY, async (campaign) => {
@@ -149,27 +149,6 @@ export async function syncWorkspace(
       const segment = extractSegmentFromName(campaign.name);
       // Tag classification: split flat tags[] into typed buckets
       const { rg_batch_tags, pair_tag, sender_tags, other_tags } = classifyTags(resolvedTags);
-
-      campaignRows.push({
-        campaign_id: campaign.id,
-        workspace_id: workspaceSlug,
-        workspace_name: workspaceSlug,
-        name: campaign.name,
-        status: campaignStatus,
-        cm_name: cmName,
-        tags: resolvedTags.length > 0 ? resolvedTags : null,
-        lead_source: leadSource,
-        rg_batch_ids: rgBatchIds.length > 0 ? rgBatchIds : null,
-        leads_count: analytics.leads_count,
-        contacted_count: analytics.contacted_count,
-        completed_count: analytics.completed_count,
-        bounced_count: analytics.bounced_count,
-        unsubscribed_count: analytics.unsubscribed_count,
-        instantly_created_at: detail.timestamp_created ?? null,
-        timestamp_updated: detail.timestamp_updated ?? null,
-        daily_limit: (detail.daily_limit as number) ?? null,
-        synced_at: now,
-      });
 
       // Build a metrics lookup keyed by step+variant for this campaign
       const metricsLookup = new Map<string, { sent: number; replied: number; opportunities: number }>();
@@ -217,18 +196,6 @@ export async function syncWorkspace(
             // Resolved previews: spintax resolved on body WITHOUT signature
             const bodyPreview = resolveSpintax(bodyNoSig);
             const subjectPreview = resolveSpintax(rawSubject);
-
-            variantCopyRows.push({
-              campaign_id: campaign.id,
-              step: stepNum,
-              variant: variantLetter,
-              subject: rawSubject,
-              body: rawBody,
-              subject_resolved: subjectPreview,
-              body_resolved: bodyPreview,
-              v_disabled: variant.v_disabled ?? false,
-              synced_at: now,
-            });
 
             // V3: build campaign_data row for this variant
             const metricsKey = `${stepNum}|${variantLetter}`;
@@ -329,27 +296,26 @@ export async function syncWorkspace(
     }
   });
 
-  // Write to old tables (dual-write during transition period)
-  await Promise.all([
-    db.upsert('campaigns', campaignRows, 'campaign_id'),
-    db.upsert('variant_copy', variantCopyRows, 'campaign_id,step,variant'),
-    db.upsert('campaign_metrics_daily', metricsRows, 'campaign_id,step,variant,date'),
-  ]);
+  // Write to time-series archive (campaign_metrics_daily retained as the
+  // historical snapshot source for trend queries; campaigns + variant_copy
+  // were dropped in V3 cleanup 2026-04-10).
+  if (metricsRows.length > 0) {
+    await db.upsert('campaign_metrics_daily', metricsRows, 'campaign_id,step,variant,date');
+  }
 
-  // Write to V3 campaign_data table
+  // Write to V3 campaign_data table (primary read target)
   if (campaignDataRows.length > 0) {
     try {
       await db.upsert('campaign_data', campaignDataRows, 'campaign_id,step,variant');
       console.log(`[v3] ${workspaceSlug}: ${campaignDataRows.length} campaign_data rows upserted`);
     } catch (err) {
       console.error(`[v3] ${workspaceSlug}: campaign_data write failed:`, err);
-      // Failure here must NOT break the sync - old tables already written above
     }
   }
 
   console.log(
     `[sync] ${workspaceSlug}: ${campaigns.length} campaigns, ` +
-    `${variantCopyRows.length} variants, ${metricsRows.length} metric rows`
+    `${campaignDataRows.length} campaign_data rows, ${metricsRows.length} metric rows`
   );
 }
 
