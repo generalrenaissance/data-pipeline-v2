@@ -183,9 +183,13 @@ async function main(): Promise<void> {
   }
   console.log(`[seq-started] Loaded API keys for ${Object.keys(keyMap).length} workspaces`);
 
+  // Read the active working set from the V3 flat table.
+  // campaign_data.status is text ('1', '2', ...), not int — PostgREST in.()
+  // requires quoted text values. step/variant=__ALL__ filters to one
+  // rollup row per campaign (omitting it would loop 15+ times per campaign).
   const campaigns = await pipelineSelect<CampaignRow>(
-    'campaigns',
-    'select=workspace_id,campaign_id&status=in.(1,2)',
+    'campaign_data',
+    'select=workspace_id,campaign_id&step=eq.__ALL__&variant=eq.__ALL__&status=in.("1","2")',
   );
   console.log(`[seq-started] ${campaigns.length} active campaigns to process`);
   if (campaigns.length === 0) {
