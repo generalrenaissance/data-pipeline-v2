@@ -340,7 +340,9 @@ export async function syncWorkspace(
       }
     }
 
-    if (pages >= maxPages) stopped = 'max_pages';
+    if (pages >= maxPages) {
+      throw new Error(`Max pages reached (${maxPages}) before sync completed`);
+    }
 
     const completedAt = new Date().toISOString();
     await upsertCheckpoint(db, {
