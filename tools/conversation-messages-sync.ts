@@ -29,11 +29,12 @@ function loadDotenv(filePath: string): void {
 }
 
 const repoRoot = path.resolve(__dirname, '..');
-const renaissanceRoot = path.resolve(repoRoot, '..', 'Renaissance');
-
-// Load .env files: repo .env for Supabase, Renaissance .env.instantly for API keys
+// Load repo .env for Supabase first. For local key files, support both a repo-
+// local .env.instantly and the older parent-directory layout used inside the
+// Renaissance mono-root.
 loadDotenv(process.env.DOTENV_PATH ?? path.join(repoRoot, '.env'));
-loadDotenv(path.join(renaissanceRoot, '.env.instantly'));
+loadDotenv(path.join(repoRoot, '.env.instantly'));
+loadDotenv(path.join(repoRoot, '..', '.env.instantly'));
 
 // Also load from INSTANTLY_API_KEYS JSON env var (GitHub Actions uses this)
 if (process.env.INSTANTLY_API_KEYS) {

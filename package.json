@@ -3,13 +3,13 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "deploy": "wrangler deploy",
-    "dev": "wrangler dev"
+    "sync": "tsx src/runner.ts",
+    "sync:sequence-started": "tsx scripts/sync-sequence-started.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.0.0",
+    "@types/node": "^20.19.39",
     "tsx": "^4.21.0",
-    "typescript": "^5.0.0",
-    "wrangler": "^4.0.0"
+    "typescript": "^5.0.0"
   }
 }

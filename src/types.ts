@@ -1,10 +1,3 @@
-export interface Env {
-  SUPABASE_URL: string;
-  SUPABASE_KEY: string;
-  ANTHROPIC_API_KEY?: string; // wrangler secret put ANTHROPIC_API_KEY
-  // Note: INSTANTLY_API_KEYS moved to GitHub Actions secrets (not needed by CF Worker)
-}
-
 export interface Campaign {
   id: string;
   name: string;
@@ -77,23 +70,4 @@ export interface TagMapping {
   tag_id: string;
   resource_id: string;
   resource_type: number;
-}
-
-export interface WebhookPayload {
-  event_type: string;
-  campaign_id: string;
-  lead_email: string;
-  workspace: string;
-  timestamp: string;
-  reply_text?: string;
-  reply_html?: string;
-  reply_subject?: string;
-  from_name?: string;
-  step?: number;
-  variant?: number;
-  firstName?: string;
-  lastName?: string;
-  companyName?: string;
-  campaign_name?: string;
-  [key: string]: unknown;
 }

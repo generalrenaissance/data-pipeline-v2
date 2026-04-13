@@ -1,10 +1,5 @@
 {
   "extends": "./tsconfig.json",
-  "compilerOptions": {
-    "types": ["node"],
-    "moduleResolution": "node",
-    "module": "NodeNext",
-    "target": "ES2022"
-  },
-  "include": ["src/runner.ts", "src/sync.ts", "src/instantly.ts", "src/supabase.ts", "src/transforms.ts", "src/types.ts", "tools/**/*.ts", "scripts/**/*.ts"]
+  "include": ["src/**/*.ts", "tools/**/*.ts", "scripts/**/*.ts"],
+  "exclude": ["node_modules"]
 }

@@ -1,6 +1,19 @@
 node_modules/
-.wrangler/
-.dev.vars
 *.log
 dist/
 .env
+.env.*
+
+# Secret-bearing files (defensive - never commit)
+railway-env.json
+*-env.json
+migrate-webhooks.*
+register-webhooks-live.sh
+
+# Internal planning docs live in Renaissance root, not this repo
+handoffs/
+specs/
+
+# GH Actions artifact downloads
+*_success.zip
+*.zip
