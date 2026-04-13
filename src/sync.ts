@@ -343,13 +343,14 @@ export async function syncAllWorkspaces(
     }
   });
 
-  // Refresh rollups once after all workspaces are written
+  // Refresh step rollups once after all workspaces are written.
+  // Campaign-level __ALL__ rows are written directly in Node.
   if (!isInboxRun) {
     try {
       await db.rpc('refresh_campaign_rollups', {});
-      console.log('[syncAllWorkspaces] Rollups refreshed.');
+      console.log('[syncAllWorkspaces] Step rollups refreshed.');
     } catch (err) {
-      console.error('[syncAllWorkspaces] Rollup refresh failed:', err);
+      console.error('[syncAllWorkspaces] Step rollup refresh failed:', err);
     }
   }
 

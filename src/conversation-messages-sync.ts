@@ -40,7 +40,61 @@ interface SyncOptions {
   workspaceFilter?: string; // Sync only this workspace slug
 }
 
+interface ConversationSyncCheckpoint {
+  workspace_id: string;
+  committed_message_timestamp: string | null;
+  last_started_at: string | null;
+  last_completed_at: string | null;
+  last_status: 'success' | 'failed' | null;
+  last_error: string | null;
+  updated_at: string | null;
+}
+
 const WORKSPACE_KEYS: Record<string, string> = {};
+const EMAIL_PAGE_SIZE = 100;
+const REQUEST_INTERVAL_MS = 3_500;
+const RATE_LIMIT_RECOVERY_MS = 60_000;
+const TIMEOUT_BACKOFF_MS = 15_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function parseTimestamp(ts: string | null | undefined): number | null {
+  if (!ts) return null;
+  const parsed = Date.parse(ts);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+function maxTimestamp(a: string | null, b: string | null): string | null {
+  const aMs = parseTimestamp(a);
+  const bMs = parseTimestamp(b);
+  if (aMs === null) return b;
+  if (bMs === null) return a;
+  return bMs > aMs ? b : a;
+}
+
+function isOlderThanCutoff(candidate: string | null | undefined, cutoff: string | null): boolean {
+  const candidateMs = parseTimestamp(candidate);
+  const cutoffMs = parseTimestamp(cutoff);
+  if (candidateMs === null || cutoffMs === null) return false;
+  return candidateMs < cutoffMs;
+}
+
+class WorkspaceRequestLimiter {
+  private nextRequestAt = 0;
+
+  async waitForSlot(): Promise<void> {
+    const waitMs = this.nextRequestAt - Date.now();
+    if (waitMs > 0) {
+      await sleep(waitMs);
+    }
+  }
+
+  markRequestComplete(): void {
+    this.nextRequestAt = Date.now() + REQUEST_INTERVAL_MS;
+  }
+}
 
 export function loadWorkspaceKeys(envPrefix: string = 'INSTANTLY_KEY_'): void {
   for (const [key, val] of Object.entries(process.env)) {
@@ -133,14 +187,16 @@ function mapEmailToRow(email: InstantlyEmail, workspaceSlug: string): Record<str
 
 async function fetchEmails(
   apiKey: string,
+  limiter: WorkspaceRequestLimiter,
   cursor?: string,
 ): Promise<{ items: InstantlyEmail[]; nextCursor: string | undefined }> {
   const url = new URL('https://api.instantly.ai/api/v2/emails');
-  url.searchParams.set('limit', '100');
+  url.searchParams.set('limit', String(EMAIL_PAGE_SIZE));
   if (cursor) url.searchParams.set('starting_after', cursor);
 
   const maxRetries = 3;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    await limiter.waitForSlot();
     try {
       const start = Date.now();
       const res = await fetch(url.toString(), {
@@ -150,13 +206,16 @@ async function fetchEmails(
         },
         signal: AbortSignal.timeout(60_000),
       });
+      limiter.markRequestComplete();
       const elapsed = ((Date.now() - start) / 1000).toFixed(1);
 
       // Instantly returns 403 (not 429) for rate limits
       if ((res.status === 429 || res.status === 403) && attempt < maxRetries) {
-        const wait = 5000 * Math.pow(2, attempt); // 5s, 10s, 20s
-        console.log(`  Rate limited (${res.status}, ${elapsed}s), waiting ${wait / 1000}s (attempt ${attempt + 1}/${maxRetries})...`);
-        await new Promise(r => setTimeout(r, wait));
+        console.log(
+          `  Rate limited (${res.status}, ${elapsed}s), waiting ${RATE_LIMIT_RECOVERY_MS / 1000}s ` +
+          `(attempt ${attempt + 1}/${maxRetries})...`
+        );
+        await sleep(RATE_LIMIT_RECOVERY_MS);
         continue;
       }
 
@@ -170,9 +229,10 @@ async function fetchEmails(
     } catch (err: any) {
       const isTimeout = err.name === 'TimeoutError' || err.name === 'AbortError' || err.message?.includes('timeout');
       if (isTimeout && attempt < maxRetries) {
-        const wait = 10_000 * Math.pow(2, attempt); // 10s, 20s, 40s
+        limiter.markRequestComplete();
+        const wait = TIMEOUT_BACKOFF_MS * Math.pow(2, attempt);
         console.log(`  Timeout on attempt ${attempt + 1}, waiting ${wait / 1000}s before retry...`);
-        await new Promise(r => setTimeout(r, wait));
+        await sleep(wait);
         continue;
       }
       throw err;
@@ -182,13 +242,19 @@ async function fetchEmails(
   throw new Error('Instantly: max retries exceeded');
 }
 
-async function getLastMessageTimestamp(db: SupabaseClient, workspaceSlug: string): Promise<string | null> {
+async function getCheckpoint(db: SupabaseClient, workspaceSlug: string): Promise<ConversationSyncCheckpoint | null> {
   const rows = await db.select(
-    'conversation_messages',
-    `select=message_timestamp&workspace_id=eq.${workspaceSlug}&order=message_timestamp.desc&limit=1`,
+    'conversation_sync_checkpoints',
+    `select=workspace_id,committed_message_timestamp,last_started_at,last_completed_at,last_status,last_error,updated_at&workspace_id=eq.${workspaceSlug}&limit=1`,
   );
-  if (rows.length === 0) return null;
-  return (rows[0] as any).message_timestamp;
+  return rows.length === 0 ? null : (rows[0] as ConversationSyncCheckpoint);
+}
+
+async function upsertCheckpoint(
+  db: SupabaseClient,
+  checkpoint: ConversationSyncCheckpoint,
+): Promise<void> {
+  await db.upsert('conversation_sync_checkpoints', [checkpoint], 'workspace_id');
 }
 
 export async function syncWorkspace(
@@ -198,9 +264,22 @@ export async function syncWorkspace(
   options: SyncOptions = {},
 ): Promise<{ rows: number; pages: number; stopped: string }> {
   const maxPages = options.maxPages ?? 2000;
-  console.log(`  [${workspaceSlug}] Fetching last message timestamp...`);
-  const lastMessageTs = options.full ? null : await getLastMessageTimestamp(db, workspaceSlug);
-  console.log(`  [${workspaceSlug}] Last message timestamp: ${lastMessageTs ?? 'none (first sync)'}`);
+  const limiter = new WorkspaceRequestLimiter();
+  const workspaceStartedAt = new Date().toISOString();
+  const existingCheckpoint = await getCheckpoint(db, workspaceSlug);
+  const committedCheckpoint = options.full ? null : (existingCheckpoint?.committed_message_timestamp ?? null);
+  await upsertCheckpoint(db, {
+    workspace_id: workspaceSlug,
+    committed_message_timestamp: existingCheckpoint?.committed_message_timestamp ?? null,
+    last_started_at: workspaceStartedAt,
+    last_completed_at: existingCheckpoint?.last_completed_at ?? null,
+    last_status: existingCheckpoint?.last_status ?? null,
+    last_error: null,
+    updated_at: workspaceStartedAt,
+  });
+
+  console.log(`  [${workspaceSlug}] Fetching committed checkpoint...`);
+  console.log(`  [${workspaceSlug}] Committed checkpoint: ${committedCheckpoint ?? 'none (first sync)'}`);
   console.log(`  [${workspaceSlug}] Starting pagination...`);
 
   let cursor: string | undefined;
@@ -208,57 +287,87 @@ export async function syncWorkspace(
   let pages = 0;
   let stopped = 'exhausted';
   let consecutiveEmpty = 0;
+  let maxSeenMessageTs: string | null = null;
 
-  while (pages < maxPages) {
-    const { items, nextCursor } = await fetchEmails(apiKey, cursor);
-    pages++;
+  try {
+    while (pages < maxPages) {
+      const { items, nextCursor } = await fetchEmails(apiKey, limiter, cursor);
+      pages++;
 
-    if (items.length === 0) {
-      consecutiveEmpty++;
-      if (consecutiveEmpty >= 2) {
-        stopped = 'empty';
-        break;
+      if (items.length === 0) {
+        consecutiveEmpty++;
+        if (consecutiveEmpty >= 2) {
+          stopped = 'empty';
+          break;
+        }
+        if (!nextCursor) {
+          stopped = 'exhausted';
+          break;
+        }
+        cursor = nextCursor;
+        continue;
       }
+
+      consecutiveEmpty = 0;
+
+      for (const item of items) {
+        const itemTs = item.timestamp_email ?? item.timestamp_created ?? null;
+        maxSeenMessageTs = maxTimestamp(maxSeenMessageTs, itemTs);
+      }
+
+      const rows = items.map(email => mapEmailToRow(email, workspaceSlug));
+      await db.upsert('conversation_messages', rows, 'id');
+      totalRows += rows.length;
+
+      if (committedCheckpoint && !options.full) {
+        const oldestInPage = items[items.length - 1];
+        const oldestTs = oldestInPage.timestamp_email ?? oldestInPage.timestamp_created ?? null;
+        if (isOlderThanCutoff(oldestTs, committedCheckpoint)) {
+          stopped = 'incremental_cutoff';
+          break;
+        }
+      }
+
       if (!nextCursor) {
         stopped = 'exhausted';
         break;
       }
+
       cursor = nextCursor;
-      continue;
-    }
-    consecutiveEmpty = 0;
 
-    const rows = items.map(email => mapEmailToRow(email, workspaceSlug));
-    await db.upsert('conversation_messages', rows, 'id');
-    totalRows += rows.length;
-
-    // Incremental: stop if oldest email in this page predates our last known message
-    if (lastMessageTs && !options.full) {
-      const oldestInPage = items[items.length - 1];
-      const oldestTs = oldestInPage.timestamp_email ?? oldestInPage.timestamp_created ?? '';
-      if (oldestTs < lastMessageTs) {
-        stopped = 'incremental_cutoff';
-        break;
+      if (pages % 10 === 0) {
+        console.log(`  [${workspaceSlug}] page ${pages}: ${totalRows} rows so far...`);
       }
     }
 
-    if (!nextCursor) {
-      stopped = 'exhausted';
-      break;
-    }
+    if (pages >= maxPages) stopped = 'max_pages';
 
-    cursor = nextCursor;
-    // Rate limit: ~2 req/sec
-    await new Promise(r => setTimeout(r, 500));
+    const completedAt = new Date().toISOString();
+    await upsertCheckpoint(db, {
+      workspace_id: workspaceSlug,
+      committed_message_timestamp: maxTimestamp(existingCheckpoint?.committed_message_timestamp ?? null, maxSeenMessageTs),
+      last_started_at: workspaceStartedAt,
+      last_completed_at: completedAt,
+      last_status: 'success',
+      last_error: null,
+      updated_at: completedAt,
+    });
 
-    if (pages % 10 === 0) {
-      console.log(`  [${workspaceSlug}] page ${pages}: ${totalRows} rows so far...`);
-    }
+    return { rows: totalRows, pages, stopped };
+  } catch (err) {
+    const completedAt = new Date().toISOString();
+    const message = err instanceof Error ? err.message : String(err);
+    await upsertCheckpoint(db, {
+      workspace_id: workspaceSlug,
+      committed_message_timestamp: existingCheckpoint?.committed_message_timestamp ?? null,
+      last_started_at: workspaceStartedAt,
+      last_completed_at: completedAt,
+      last_status: 'failed',
+      last_error: message,
+      updated_at: completedAt,
+    });
+    throw err;
   }
-
-  if (pages >= maxPages) stopped = 'max_pages';
-
-  return { rows: totalRows, pages, stopped };
 }
 
 export async function syncAllWorkspaces(
