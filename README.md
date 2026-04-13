@@ -3,8 +3,7 @@
 GitHub Actions-driven data sync repo for Renaissance campaign data.
 
 This repository pulls data from Instantly and Slack, then writes the normalized
-results into Pipeline Supabase. It does not run a Cloudflare Worker or expose a
-webhook endpoint.
+results into Pipeline Supabase. It is a GitHub Actions-only sync repo.
 
 ## Runtime
 
@@ -14,6 +13,9 @@ webhook endpoint.
 - `sequence-started-sync-gh.yml` -> `scripts/sync-sequence-started.ts`
 
 ## Required secrets
+
+Store secret values in GitHub Actions secrets or local ignored `.env` files
+only. Do not commit credentials to the repository.
 
 - `INSTANTLY_API_KEYS`
 - `PIPELINE_SUPABASE_URL`
