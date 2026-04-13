@@ -1,4 +1,5 @@
 import { InstantlyClient } from './instantly';
+import { loadCampaignTagCache } from './campaign-tag-cache';
 import { SupabaseClient } from './supabase';
 import {
   classifyLeadSource,
@@ -19,6 +20,28 @@ import {
 
 export const CAMPAIGN_CONCURRENCY = 5;
 export const WORKSPACE_CONCURRENCY = 3;
+
+async function fetchCampaignTagsFromMappings(
+  client: InstantlyClient,
+  tagMap: Map<string, string>,
+  workspaceSlug: string,
+): Promise<Map<string, string[]>> {
+  const campaignTagsFromMappings = new Map<string, string[]>();
+  const allMappings = await client.getAllCustomTagMappings();
+  const campaignMappings = allMappings.filter(m => m.resource_type === 2);
+  for (const m of campaignMappings) {
+    const label = tagMap.get(m.tag_id);
+    if (!label) continue;
+    const existing = campaignTagsFromMappings.get(m.resource_id) ?? [];
+    existing.push(label);
+    campaignTagsFromMappings.set(m.resource_id, existing);
+  }
+  console.warn(
+    `[tags] ${workspaceSlug}: cache unavailable, fell back to live mappings ` +
+    `(${campaignMappings.length} campaign mappings / ${campaignTagsFromMappings.size} campaigns tagged)`
+  );
+  return campaignTagsFromMappings;
+}
 
 export async function runWithConcurrency<T, R>(
   items: T[],
@@ -67,41 +90,6 @@ export async function syncWorkspace(
     return;
   }
 
-  // Build tag map (UUID → label) for resolving per-campaign tags
-  let tagMap: Map<string, string>;
-  try {
-    tagMap = await client.getTagMap();
-  } catch (err) {
-    console.warn(`[sync] ${workspaceSlug}: getTagMap failed, continuing without tags:`, err);
-    tagMap = new Map();
-  }
-
-  // Fetch ALL custom-tag-mappings ONCE, filter client-side to campaigns.
-  // /custom-tag-mappings is the authoritative source of applied tags.
-  // email_tag_list is a legacy/secondary field that some teams still populate;
-  // many workspaces (e.g. koi-and-destroy) have tags only in the mapping
-  // endpoint, so without this fetch lead_source is empty for most campaigns.
-  // Instantly's filters on this endpoint are broken — must fetch unfiltered.
-  const campaignTagsFromMappings = new Map<string, string[]>();
-  try {
-    const allMappings = await client.getAllCustomTagMappings();
-    const campaignMappings = allMappings.filter(m => m.resource_type === 2);
-    for (const m of campaignMappings) {
-      const label = tagMap.get(m.tag_id);
-      if (!label) continue; // orphan mapping (tag deleted but mapping lingers)
-      const existing = campaignTagsFromMappings.get(m.resource_id) ?? [];
-      existing.push(label);
-      campaignTagsFromMappings.set(m.resource_id, existing);
-    }
-    console.log(
-      `[tags] ${workspaceSlug}: ${allMappings.length} total mappings, ` +
-      `${campaignMappings.length} campaign mappings, ` +
-      `${campaignTagsFromMappings.size} campaigns tagged`
-    );
-  } catch (err) {
-    console.warn(`[sync] ${workspaceSlug}: getAllCustomTagMappings failed, falling back to email_tag_list only:`, err);
-  }
-
   // List all campaigns — retry once on timeout
   let campaigns: Awaited<ReturnType<typeof client.getCampaigns>>;
   try {
@@ -111,12 +99,34 @@ export async function syncWorkspace(
     campaigns = await client.getCampaigns();
   }
 
+  // Build tag map (UUID → label) for resolving per-campaign tags
+  let tagMap: Map<string, string>;
+  try {
+    tagMap = await client.getTagMap();
+  } catch (err) {
+    console.warn(`[sync] ${workspaceSlug}: getTagMap failed, continuing without tags:`, err);
+    tagMap = new Map();
+  }
+
+  let campaignTagsFromCache = new Map<string, string[]>();
+  try {
+    campaignTagsFromCache = await loadCampaignTagCache(db, workspaceSlug);
+    console.log(`[tags] ${workspaceSlug}: ${campaignTagsFromCache.size} cached rows loaded`);
+    if (campaignTagsFromCache.size === 0 && campaigns.length > 0) {
+      campaignTagsFromCache = await fetchCampaignTagsFromMappings(client, tagMap, workspaceSlug);
+    }
+  } catch (err) {
+    console.warn(`[sync] ${workspaceSlug}: campaign_tag_cache unavailable, using live mappings:`, err);
+    campaignTagsFromCache = await fetchCampaignTagsFromMappings(client, tagMap, workspaceSlug);
+  }
+
   // metricsRows feeds campaign_metrics_daily — the time-series archive,
   // retained as the only source of dated snapshots for trend analysis.
   const metricsRows: unknown[] = [];
 
   // V3: campaign_data rows (one per variant + __ALL__ rollup)
   const campaignDataRows: unknown[] = [];
+  const campaignsTagged = new Set<string>();
 
   await runWithConcurrency(campaigns, CAMPAIGN_CONCURRENCY, async (campaign) => {
     try {
@@ -134,8 +144,11 @@ export async function syncWorkspace(
       const legacyTags = (detail.email_tag_list ?? [])
         .map(id => tagMap.get(id))
         .filter(Boolean) as string[];
-      const mappingTags = campaignTagsFromMappings.get(campaign.id) ?? [];
+      const mappingTags = campaignTagsFromCache.get(campaign.id) ?? [];
       const resolvedTags = Array.from(new Set([...legacyTags, ...mappingTags]));
+      if (resolvedTags.length > 0) {
+        campaignsTagged.add(campaign.id);
+      }
       const rgBatchIds = parseRgBatchIds(campaign.name);
       const leadSource = classifyLeadSource(resolvedTags);
       const campaignStatus = String(detail.status ?? campaign.status ?? '');
@@ -315,6 +328,7 @@ export async function syncWorkspace(
 
   console.log(
     `[sync] ${workspaceSlug}: ${campaigns.length} campaigns, ` +
+    `${campaignsTagged.size} tagged after cache merge, ` +
     `${campaignDataRows.length} campaign_data rows, ${metricsRows.length} metric rows`
   );
 }

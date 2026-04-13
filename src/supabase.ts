@@ -78,6 +78,21 @@ export class SupabaseClient {
     return res.json() as Promise<unknown[]>;
   }
 
+  async delete(table: string, params: string): Promise<void> {
+    const res = await fetch(`${this.url}/rest/v1/${table}?${params}`, {
+      method: 'DELETE',
+      headers: {
+        'Authorization': `Bearer ${this.key}`,
+        'apikey': this.key,
+        'Prefer': 'return=minimal',
+      },
+    });
+    if (!res.ok) {
+      const err = await res.text().catch(() => '');
+      throw new Error(`Supabase delete ${res.status} on ${table}: ${err}`);
+    }
+  }
+
   async rpc(fn: string, params: Record<string, unknown>): Promise<unknown> {
     const res = await fetch(`${this.url}/rest/v1/rpc/${fn}`, {
       method: 'POST',
