@@ -196,22 +196,29 @@ export function extractSignature(body: string): { body: string; signature: strin
 // Do NOT derive segment from Instantly tags — they are batch/infra identifiers.
 
 const SEGMENT_KEYWORDS: Array<[string[], string]> = [
-  [['restaurant', 'bar', 'bars', 'catering', 'dining'], 'restaurant'],
+  [['home services', 'home service', 'property maintenance', 'prop maintenance', 'prop mainten', 'roofing', 'contractors', 'electrician'], 'home_services'],
+  [['finance', 'accounting', 'controller', 'controllers', 'cfo', 'vp finance', 'finance exec'], 'finance_accounting'],
+  [['manufacturing', 'manufacturer', 'manufactur', 'manu'], 'manufacturing'],
+  [['consulting', 'consultants', 'consultant', 'professional services', 'professional service'], 'consulting'],
+  [['nonprofit', 'non-profit', 'non profit', 'nonprofits', 'associations', 'association'], 'nonprofit'],
+  [['e-commerce', 'ecommerce', 'ecom'], 'ecommerce'],
+  [['spanish', 'latino', 'hispanic'], 'spanish_speaking'],
+  [['restaurant', 'bar', 'bars', 'catering', 'dining', 'hospitality', 'hotel', 'hotels', 'bakery'], 'restaurant'],
   [['construction'], 'construction'],
   [['cleaning'], 'cleaning'],
-  [['trucking'], 'trucking'],
+  [['trucking', 'logistics', 'courier'], 'trucking'],
   [['hvac'], 'hvac'],
   [['landscaping', 'lawn'], 'landscaping'],
-  [['retail', 'clothing', 'beauty', 'salon'], 'retail'],
+  [['retail', 'clothing', 'beauty', 'salon', 'department store', 'store', 'shops', 'shop'], 'retail'],
   [['home improvement', 'home imp'], 'home_improvement'],
   [['advertising'], 'advertising'],
   [['insurance'], 'insurance'],
-  [['law firm', 'law firms'], 'legal'],
+  [['law firm', 'law firms', 'legal', 'patent attorney'], 'legal'],
   [['auto', 'automotive'], 'automotive'],
-  [['healthcare', 'medical'], 'healthcare'],
-  [['presidents'], 'presidents'],
+  [['healthcare', 'medical', 'mental health', 'psychiatrist', 'therapy', 'physical therapy', 'chiropractor', 'acupuncture', 'accupunture', 'medspa'], 'healthcare'],
+  [['presidents', 'president'], 'presidents'],
   [['ceos', 'ceo'], 'ceos'],
-  [['general', 'smb owners', 'smb', 'owners', 'business owner'], 'general'],
+  [['general', ' gen ', 'gen ', 'smb owners', 'smb', 'owners', 'business owner'], 'general'],
 ];
 
 export function extractSegmentFromName(campaignName: string): string | null {

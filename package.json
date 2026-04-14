@@ -5,6 +5,7 @@
   "scripts": {
     "sync": "tsx src/runner.ts",
     "sync:sequence-started": "tsx scripts/sync-sequence-started.ts",
+    "test": "node --import tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit -p tsconfig.node.json"
   },
   "devDependencies": {
