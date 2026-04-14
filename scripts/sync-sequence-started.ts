@@ -1,3 +1,5 @@
+import { parseInstantlyKeyMap } from '../src/instantly-key-map';
+
 /**
  * sync-sequence-started.ts
  *
@@ -177,7 +179,7 @@ async function main(): Promise<void> {
 
   let keyMap: Record<string, string>;
   try {
-    keyMap = JSON.parse(INSTANTLY_API_KEYS!) as Record<string, string>;
+    keyMap = parseInstantlyKeyMap(INSTANTLY_API_KEYS!);
   } catch {
     throw new Error('INSTANTLY_API_KEYS is not valid JSON');
   }

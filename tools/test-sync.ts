@@ -18,6 +18,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { parseInstantlyKeyMap } from '../src/instantly-key-map';
 import { syncAllWorkspaces } from '../src/sync';
 
 // Load .env manually from repo root (no dotenv dependency needed)
@@ -58,7 +59,7 @@ async function main() {
 
   let keyMap: Record<string, string>;
   try {
-    keyMap = JSON.parse(keysRaw);
+    keyMap = parseInstantlyKeyMap(keysRaw);
   } catch (e) {
     console.error('[test-sync] Failed to parse INSTANTLY_API_KEYS as JSON:', e);
     process.exit(1);
@@ -72,7 +73,7 @@ async function main() {
     keyMap = Object.fromEntries(Object.entries(keyMap).filter(([slug]) => slugs.has(slug)));
     if (Object.keys(keyMap).length === 0) {
       console.error(`[test-sync] No matching workspaces for: ${[...slugs].join(', ')}`);
-      console.error(`[test-sync] Available: ${Object.keys(JSON.parse(keysRaw)).join(', ')}`);
+      console.error(`[test-sync] Available: ${Object.keys(parseInstantlyKeyMap(keysRaw)).join(', ')}`);
       process.exit(1);
     }
     console.log(`[test-sync] Workspace filter: ${Object.keys(keyMap).length}/${before} workspaces`);

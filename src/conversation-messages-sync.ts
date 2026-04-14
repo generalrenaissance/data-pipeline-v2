@@ -9,6 +9,7 @@
  */
 
 import { SupabaseClient } from './supabase';
+import { parseInstantlyKeyMap } from './instantly-key-map';
 
 interface InstantlyEmail {
   id: string;
@@ -111,10 +112,10 @@ export function loadWorkspaceKeys(envPrefix: string = 'INSTANTLY_KEY_'): void {
 }
 
 export function loadWorkspaceKeysFromJson(json: string): void {
-  const parsed = JSON.parse(json);
+  const parsed = parseInstantlyKeyMap(json);
   for (const [name, key] of Object.entries(parsed)) {
     const slug = name.toLowerCase().replace(/\s+/g, '-');
-    WORKSPACE_KEYS[slug] = key as string;
+    WORKSPACE_KEYS[slug] = key;
   }
 }
 

@@ -1,5 +1,6 @@
 import { loadCampaignTagCache, upsertCampaignTagCache, deleteStaleCampaignTagCache, type CampaignTagCacheRow } from '../src/campaign-tag-cache';
 import { InstantlyClient } from '../src/instantly';
+import { parseInstantlyKeyMap } from '../src/instantly-key-map';
 import { SupabaseClient } from '../src/supabase';
 import type { Campaign } from '../src/types';
 
@@ -79,7 +80,7 @@ async function main(): Promise<void> {
     throw new Error(`Missing env vars: ${missing.join(', ')}`);
   }
 
-  const parsed = JSON.parse(INSTANTLY_API_KEYS!) as Record<string, string>;
+  const parsed = parseInstantlyKeyMap(INSTANTLY_API_KEYS!);
   const workspaceFilter = new Set(
     (WORKSPACE_FILTER ?? '').split(',').map((entry) => toSlug(entry.trim())).filter(Boolean),
   );

@@ -19,6 +19,7 @@
  */
 
 import { syncAllWorkspaces } from './sync';
+import { parseInstantlyKeyMap } from './instantly-key-map';
 
 async function main() {
   const keysRaw = process.env.INSTANTLY_API_KEYS;
@@ -36,7 +37,7 @@ async function main() {
 
   let keyMap: Record<string, string>;
   try {
-    keyMap = JSON.parse(keysRaw);
+    keyMap = parseInstantlyKeyMap(keysRaw);
   } catch (e) {
     console.error('[runner] Failed to parse INSTANTLY_API_KEYS as JSON:', e);
     process.exit(1);
