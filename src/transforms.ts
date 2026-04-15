@@ -196,7 +196,7 @@ export function extractSignature(body: string): { body: string; signature: strin
 // Do NOT derive segment from Instantly tags — they are batch/infra identifiers.
 
 const SEGMENT_KEYWORDS: Array<[string[], string]> = [
-  [['home services', 'home service', 'property maintenance', 'prop maintenance', 'prop mainten', 'roofing', 'contractors', 'electrician'], 'home_services'],
+  [['home services', 'home service', 'home improvement', 'home imp', 'property maintenance', 'prop maintenance', 'prop mainten', 'roofing', 'contractors', 'electrician'], 'home_services'],
   [['finance', 'accounting', 'controller', 'controllers', 'cfo', 'vp finance', 'finance exec'], 'finance_accounting'],
   [['manufacturing', 'manufacturer', 'manufactur', 'manu'], 'manufacturing'],
   [['consulting', 'consultants', 'consultant', 'professional services', 'professional service'], 'consulting'],
@@ -210,7 +210,6 @@ const SEGMENT_KEYWORDS: Array<[string[], string]> = [
   [['hvac'], 'hvac'],
   [['landscaping', 'lawn'], 'landscaping'],
   [['retail', 'clothing', 'beauty', 'salon', 'department store', 'store', 'shops', 'shop'], 'retail'],
-  [['home improvement', 'home imp'], 'home_improvement'],
   [['advertising'], 'advertising'],
   [['insurance'], 'insurance'],
   [['law firm', 'law firms', 'legal', 'patent attorney'], 'legal'],

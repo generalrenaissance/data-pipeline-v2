@@ -26,3 +26,27 @@ test('widens synonym coverage for existing buckets without regressing general', 
   assert.equal(extractSegmentFromName('ON - A - COURIER - LAUTARO'), 'trucking');
   assert.equal(extractSegmentFromName('GENERAL - William'), 'general');
 });
+
+test('routes legacy home improvement names into home_services', () => {
+  assert.equal(
+    extractSegmentFromName('OLD - KD2 - BrightFunds - Home Improvement(TOMI)'),
+    'home_services',
+  );
+  assert.equal(
+    extractSegmentFromName('OLD - Pair 17 - Fieldstone Growth - Home Improvement (LEO)'),
+    'home_services',
+  );
+  assert.equal(
+    extractSegmentFromName('OLD - B - HOME IMPROVEMENT - LAUTARO'),
+    'home_services',
+  );
+});
+
+test('preserves clean Presidents and CEOs matches while industry keywords still win first', () => {
+  assert.equal(extractSegmentFromName('ALL CEOs USA - 10-50,000 employees 5'), 'ceos');
+  assert.equal(extractSegmentFromName('Presidents - 1'), 'presidents');
+  assert.equal(
+    extractSegmentFromName('Owner/Founder/CEO Self Employed Landscaping'),
+    'landscaping',
+  );
+});
