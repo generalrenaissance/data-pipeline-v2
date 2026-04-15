@@ -50,3 +50,10 @@ test('preserves clean Presidents and CEOs matches while industry keywords still 
     'landscaping',
   );
 });
+
+test('keeps promoted unapproved segments mapped in the classifier', () => {
+  assert.equal(extractSegmentFromName('Pair X - Cleaning - (CM) Y'), 'cleaning');
+  assert.equal(extractSegmentFromName('Pair X - Advertising - (CM) Y'), 'advertising');
+  assert.equal(extractSegmentFromName('Pair X - Automotive - (CM) Y'), 'automotive');
+  assert.equal(extractSegmentFromName('Pair X - Insurance - (CM) Y'), 'insurance');
+});
