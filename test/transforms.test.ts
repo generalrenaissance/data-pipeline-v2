@@ -26,3 +26,10 @@ test('widens synonym coverage for existing buckets without regressing general', 
   assert.equal(extractSegmentFromName('ON - A - COURIER - LAUTARO'), 'trucking');
   assert.equal(extractSegmentFromName('GENERAL - William'), 'general');
 });
+
+test('keeps promoted unapproved segments mapped in the classifier', () => {
+  assert.equal(extractSegmentFromName('Pair X - Cleaning - (CM) Y'), 'cleaning');
+  assert.equal(extractSegmentFromName('Pair X - Advertising - (CM) Y'), 'advertising');
+  assert.equal(extractSegmentFromName('Pair X - Automotive - (CM) Y'), 'automotive');
+  assert.equal(extractSegmentFromName('Pair X - Insurance - (CM) Y'), 'insurance');
+});
