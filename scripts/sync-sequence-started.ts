@@ -6,7 +6,7 @@ import { parseInstantlyKeyMap } from '../src/instantly-key-map';
  * Every 6h script. Paginates POST /api/v2/leads/list with
  * filter=FILTER_VAL_CONTACTED per campaign to get the Leads tab
  * "Sequence started" count (excludes deleted leads).
- * Upserts to campaign_data.sequence_started in Pipeline Supabase.
+ * Upserts to campaign_data.lead_sequence_started in Pipeline Supabase.
  *
  * Run: npx tsx scripts/sync-sequence-started.ts
  */
@@ -124,7 +124,7 @@ async function pipelineUpsertOne(row: SequenceStartedRow): Promise<void> {
         campaign_id: row.campaign_id,
         step: '__ALL__',
         variant: '__ALL__',
-        sequence_started: row.sequence_started,
+        lead_sequence_started: row.sequence_started,
       }]),
     },
   );

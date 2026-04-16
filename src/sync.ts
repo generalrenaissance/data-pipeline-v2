@@ -246,7 +246,7 @@ export async function syncWorkspace(
               emails_sent: sent,
               replies: replied,
               opportunities,
-              leads_contacted: null, // campaign-level only
+              analytics_sequence_started: null, // campaign-level only
               total_leads: null,
               leads_completed: null,
               leads_bounced: null,
@@ -295,7 +295,7 @@ export async function syncWorkspace(
         emails_sent: totalSent,
         replies: totalReplied,
         opportunities: totalOpps,
-        leads_contacted: analytics.contacted_count ?? null,
+        analytics_sequence_started: analytics.contacted_count ?? null,
         total_leads: analytics.leads_count ?? null,
         leads_completed: analytics.completed_count ?? null,
         leads_bounced: analytics.bounced_count ?? null,
