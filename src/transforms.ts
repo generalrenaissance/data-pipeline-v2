@@ -337,3 +337,41 @@ export const WORKSPACE_CM_DEFAULTS: Record<string, string | null> = {
   'erc-2': null,
   'the-eagles': 'LAUTARO',  // all campaigns are LAUTARO, parseCmName catches via pattern 2
 };
+
+/**
+ * Workspace slug → human display name.
+ * Written to campaign_data.workspace_name (and sender_inboxes.workspace_name).
+ * workspace_id always remains the slug — this map only affects display.
+ *
+ * When an Instantly workspace is renamed, update the value here. The slug
+ * (INSTANTLY_KEY_MAP secret key) stays stable so downstream joins don't break.
+ * Unknown slugs fall back to the slug itself.
+ */
+export const WORKSPACE_DISPLAY_NAMES: Record<string, string> = {
+  'renaissance-1': 'Renaissance 1',
+  'renaissance-2': 'Renaissance 2',
+  'renaissance-3': 'Renaissance 3',
+  'renaissance-4': 'Renaissance 4',
+  'renaissance-5': 'Renaissance 5',
+  'renaissance-6': 'Renaissance 6',
+  'renaissance-7': 'Renaissance 7',
+  'koi-and-destroy': 'Koi and Destroy',
+  'the-dyad': 'The Dyad',
+  'the-gatekeepers': 'The Gatekeepers',
+  'the-eagles': 'The Eagles',
+  'equinox': 'Equinox',
+  'outlook-1': 'Outlook 1',
+  'outlook-2': 'Outlook 2',
+  'outlook-3': 'Outlook 3',
+  'prospects-power': 'Prospects Power',
+  'automated-applications': 'Automated Applications',
+  'warm-leads': 'Warm Leads',
+  'section-125-1': 'Section 125 1',
+  'section-125-2': 'Section 125 2',
+  'erc-1': 'Tariffs + Funding',
+  'erc-2': 'ERC 2',
+};
+
+export function workspaceDisplayName(slug: string): string {
+  return WORKSPACE_DISPLAY_NAMES[slug] ?? slug;
+}

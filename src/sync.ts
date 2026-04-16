@@ -16,6 +16,7 @@ import {
   resolveSubject,
   stripHtml,
   WORKSPACE_CM_DEFAULTS,
+  workspaceDisplayName,
 } from './transforms';
 
 export const CAMPAIGN_CONCURRENCY = 5;
@@ -76,7 +77,7 @@ export async function syncWorkspace(
     await db.upsert('sender_inboxes', accounts.map(a => ({
       email: a.email,
       workspace_id: workspaceSlug,
-      workspace_name: workspaceSlug,
+      workspace_name: workspaceDisplayName(workspaceSlug),
       status: String(a.status ?? ''),
       provider: a.provider_code !== undefined ? String(a.provider_code) : null,
       warmup_status: a.warmup_status ?? null,
@@ -219,7 +220,7 @@ export async function syncWorkspace(
               campaign_id: campaign.id,
               campaign_name: campaign.name,
               workspace_id: workspaceSlug,
-              workspace_name: workspaceSlug,
+              workspace_name: workspaceDisplayName(workspaceSlug),
               cm_name: cmName,
               segment,
               product,
@@ -268,7 +269,7 @@ export async function syncWorkspace(
         campaign_id: campaign.id,
         campaign_name: campaign.name,
         workspace_id: workspaceSlug,
-        workspace_name: workspaceSlug,
+        workspace_name: workspaceDisplayName(workspaceSlug),
         cm_name: cmName,
         segment,
         product,
