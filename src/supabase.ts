@@ -93,6 +93,23 @@ export class SupabaseClient {
     }
   }
 
+  async update(table: string, params: string, patch: Record<string, unknown>): Promise<void> {
+    const res = await fetch(`${this.url}/rest/v1/${table}?${params}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${this.key}`,
+        'apikey': this.key,
+        'Prefer': 'return=minimal',
+      },
+      body: JSON.stringify(patch),
+    });
+    if (!res.ok) {
+      const err = await res.text().catch(() => '');
+      throw new Error(`Supabase update ${res.status} on ${table}: ${err}`);
+    }
+  }
+
   async rpc(fn: string, params: Record<string, unknown>): Promise<unknown> {
     const res = await fetch(`${this.url}/rest/v1/rpc/${fn}`, {
       method: 'POST',

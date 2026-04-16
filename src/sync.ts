@@ -21,6 +21,110 @@ import {
 
 export const CAMPAIGN_CONCURRENCY = 5;
 export const WORKSPACE_CONCURRENCY = 3;
+export const GHOST_CLEANUP_MAX_PER_WORKSPACE = 20;
+export const GHOST_STATUS = 'deleted';
+
+export interface WorkspaceCampaignRollup {
+  campaign_id: string;
+  campaign_name: string;
+  workspace_id: string;
+  status: string;
+  synced_at: string;
+}
+
+export interface GhostCleanupPlan {
+  missing: WorkspaceCampaignRollup[];
+  skipReason: 'empty_fetch' | 'over_cap' | null;
+}
+
+function quotePostgrest(value: string): string {
+  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
+function buildInFilter(values: string[]): string {
+  return `(${values.map(quotePostgrest).join(',')})`;
+}
+
+export function buildGhostCleanupPlan(
+  fetchedCampaignIds: Set<string>,
+  activeRollups: WorkspaceCampaignRollup[],
+  maxPerWorkspace: number = GHOST_CLEANUP_MAX_PER_WORKSPACE,
+): GhostCleanupPlan {
+  if (fetchedCampaignIds.size === 0) {
+    return { missing: [], skipReason: 'empty_fetch' };
+  }
+
+  const missing = activeRollups.filter(row => !fetchedCampaignIds.has(row.campaign_id));
+  if (missing.length > maxPerWorkspace) {
+    return { missing, skipReason: 'over_cap' };
+  }
+
+  return { missing, skipReason: null };
+}
+
+async function cleanupMissingCampaigns(
+  workspaceSlug: string,
+  db: SupabaseClient,
+  fetchedCampaignIds: Set<string>,
+  now: string,
+): Promise<void> {
+  const workspaceIds = [workspaceSlug, workspaceDisplayName(workspaceSlug)];
+  const activeStatuses = ['1', '2', 'Active'];
+  const params = [
+    'select=campaign_id,campaign_name,workspace_id,status,synced_at',
+    `workspace_id=in.${buildInFilter(workspaceIds)}`,
+    'step=eq.__ALL__',
+    'variant=eq.__ALL__',
+    `status=in.${buildInFilter(activeStatuses)}`,
+  ].join('&');
+
+  const activeRollups = await db.select('campaign_data', params) as WorkspaceCampaignRollup[];
+  const plan = buildGhostCleanupPlan(fetchedCampaignIds, activeRollups);
+
+  if (plan.skipReason === 'empty_fetch') {
+    console.warn(`[ghost-cleanup] ${workspaceSlug}: skipped because campaign fetch returned 0 ids`);
+    return;
+  }
+
+  if (plan.skipReason === 'over_cap') {
+    console.error(
+      `[ghost-cleanup] ${workspaceSlug}: refusing to mark ${plan.missing.length} campaigns ${GHOST_STATUS} ` +
+      `(cap=${GHOST_CLEANUP_MAX_PER_WORKSPACE})`
+    );
+    return;
+  }
+
+  if (plan.missing.length === 0) {
+    return;
+  }
+
+  const dryRun = process.env.GHOST_ARCHIVE_DRY_RUN === 'true';
+  const missingLabels = plan.missing.map(row => `${row.campaign_name} (${row.campaign_id})`);
+
+  if (dryRun) {
+    console.warn(
+      `[ghost-cleanup] ${workspaceSlug}: dry run - would mark ${plan.missing.length} campaigns ${GHOST_STATUS}: ` +
+      missingLabels.join('; ')
+    );
+    return;
+  }
+
+  for (const row of plan.missing) {
+    const updateParams = [
+      `campaign_id=eq.${row.campaign_id}`,
+      `status=in.${buildInFilter(activeStatuses)}`,
+    ].join('&');
+    await db.update('campaign_data', updateParams, {
+      status: GHOST_STATUS,
+      synced_at: now,
+    });
+  }
+
+  console.warn(
+    `[ghost-cleanup] ${workspaceSlug}: marked ${plan.missing.length} campaigns ${GHOST_STATUS}: ` +
+    missingLabels.join('; ')
+  );
+}
 
 async function fetchCampaignTagsFromMappings(
   client: InstantlyClient,
@@ -99,6 +203,7 @@ export async function syncWorkspace(
     console.warn(`[sync] ${workspaceSlug}: getCampaigns failed, retrying once...`);
     campaigns = await client.getCampaigns();
   }
+  const fetchedCampaignIds = new Set(campaigns.map(campaign => campaign.id));
 
   // Build tag map (UUID → label) for resolving per-campaign tags
   let tagMap: Map<string, string>;
@@ -325,6 +430,12 @@ export async function syncWorkspace(
     } catch (err) {
       console.error(`[v3] ${workspaceSlug}: campaign_data write failed:`, err);
     }
+  }
+
+  try {
+    await cleanupMissingCampaigns(workspaceSlug, db, fetchedCampaignIds, now);
+  } catch (err) {
+    console.error(`[ghost-cleanup] ${workspaceSlug}: failed:`, err);
   }
 
   console.log(
