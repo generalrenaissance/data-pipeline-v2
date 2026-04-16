@@ -2,8 +2,12 @@ name: Sequence Started Sync
 
 on:
   schedule:
-    - cron: '0 */6 * * *'
+    - cron: '0 * * * *'
   workflow_dispatch: {}
+
+concurrency:
+  group: sequence-started-sync
+  cancel-in-progress: false
 
 jobs:
   sync:
