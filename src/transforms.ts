@@ -63,16 +63,18 @@ export function resolveSubject(raw: string): string {
  */
 const KNOWN_CMS = new Set([
   'EYVER', 'TOMI', 'CARLOS', 'BRENDAN', 'LEO', 'IDO',
-  'MARCOS', 'SHAAN', 'ANDRES', 'LAUTARO', 'ALEX', 'SAMUEL',
+  'MARCOS', 'SHAAN', 'ANDRES', 'LAUTARO', 'ALEX', 'SAM', 'SAMUEL',
   'DENVER', 'GRACE',
 ]);
 
 /**
  * Parse CM name from campaign name using multiple pattern strategies.
  *
- * Pattern 1: (NAME) or (NAME) RB/X at end — most common
+ * Pattern 1: (NAME) or (NAME) RB/X [optional IM name] at end — most common
  *   "ON - Pair 5 - British (CARLOS)" → "CARLOS"
  *   "ON - PAIR 10 - REAL ESTATE (ANDRES)" → "ANDRES"
+ *   "ON - PAIR 10,11 - CEOS - (SAM) X Kenneth" → "SAM"
+ *   "OLD - PAIR 3 - HVAC - (SAM) X Jessica" → "SAM"
  *
  * Pattern 2: - NAME or - NAME N at end — used in The Eagles workspace
  *   "ON - A - CEO - LAUTARO 1" → "LAUTARO"
@@ -83,8 +85,8 @@ const KNOWN_CMS = new Set([
 export function parseCmName(campaignName: string): string | null {
   const upper = campaignName.toUpperCase();
 
-  // Pattern 1: (NAME) optionally followed by RB, X, or whitespace at end
-  const parenMatch = upper.match(/\(([A-Z]+)\)\s*(?:RB|X)?\s*$/);
+  // Pattern 1: (NAME) optionally followed by RB or X, then optional IM name
+  const parenMatch = upper.match(/\(([A-Z]+)\)\s*(?:(?:RB|X)(?:\s+\w+)?)?\s*$/);
   if (parenMatch && KNOWN_CMS.has(parenMatch[1])) {
     return parenMatch[1];
   }
