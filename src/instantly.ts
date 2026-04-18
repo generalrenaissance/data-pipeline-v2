@@ -1,4 +1,4 @@
-import type { Campaign, StepAnalytics, CampaignAnalytics, Account, Tag, TagMapping } from './types';
+import type { Campaign, StepAnalytics, CampaignAnalytics, CampaignDailyAnalytics, Account, Tag, TagMapping } from './types';
 
 export class InstantlyClient {
   private baseUrl = 'https://api.instantly.ai/api/v2';
@@ -64,6 +64,45 @@ export class InstantlyClient {
       bounced_count: (c.bounced_count as number) ?? 0,
       unsubscribed_count: (c.unsubscribed_count as number) ?? 0,
     };
+  }
+
+  /**
+   * Per-calendar-day campaign metrics from Instantly /campaigns/analytics/daily.
+   * Returns one row per day in [start_date, end_date] that had activity. Empty
+   * array if no activity. Both dates inclusive, format YYYY-MM-DD.
+   *
+   * Unlike /campaigns/analytics/steps (cumulative, eventually consistent), this
+   * endpoint returns UI-aligned day values with retroactive updates applied.
+   */
+  async getCampaignDailyAnalytics(
+    campaignId: string,
+    startDate: string,
+    endDate: string,
+  ): Promise<CampaignDailyAnalytics[]> {
+    const raw = await this.get<unknown>('/campaigns/analytics/daily', {
+      campaign_id: campaignId,
+      start_date: startDate,
+      end_date: endDate,
+    });
+    const items = Array.isArray(raw)
+      ? raw
+      : ((raw as any).items ?? (raw as any).daily ?? []);
+    return (items as any[]).map(r => ({
+      date: String(r.date),
+      sent: r.sent ?? 0,
+      contacted: r.contacted ?? 0,
+      new_leads_contacted: r.new_leads_contacted ?? 0,
+      opened: r.opened ?? 0,
+      unique_opened: r.unique_opened ?? 0,
+      replies: r.replies ?? 0,
+      unique_replies: r.unique_replies ?? 0,
+      replies_automatic: r.replies_automatic ?? 0,
+      unique_replies_automatic: r.unique_replies_automatic ?? 0,
+      clicks: r.clicks ?? 0,
+      unique_clicks: r.unique_clicks ?? 0,
+      opportunities: r.opportunities ?? 0,
+      unique_opportunities: r.unique_opportunities ?? 0,
+    }));
   }
 
   /** Per-step/variant cumulative metrics */

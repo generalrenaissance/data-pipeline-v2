@@ -47,6 +47,23 @@ export interface CampaignAnalytics {
   unsubscribed_count: number;
 }
 
+export interface CampaignDailyAnalytics {
+  date: string;
+  sent: number;
+  contacted: number;
+  new_leads_contacted: number;
+  opened: number;
+  unique_opened: number;
+  replies: number;
+  unique_replies: number;
+  replies_automatic: number;
+  unique_replies_automatic: number;
+  clicks: number;
+  unique_clicks: number;
+  opportunities: number;
+  unique_opportunities: number;
+}
+
 export interface Account {
   email: string;
   status?: string;

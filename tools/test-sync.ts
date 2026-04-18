@@ -79,12 +79,16 @@ async function main() {
     console.log(`[test-sync] Workspace filter: ${Object.keys(keyMap).length}/${before} workspaces`);
   }
 
-  const isInboxRun = process.argv.includes('--inbox');
-  console.log(`[test-sync] Starting ${isInboxRun ? 'inbox' : 'full'} sync for ${Object.keys(keyMap).length} workspaces`);
+  const runType: 'full' | 'inbox' | 'daily_metrics' = process.argv.includes('--daily-metrics')
+    ? 'daily_metrics'
+    : process.argv.includes('--inbox')
+      ? 'inbox'
+      : 'full';
+  console.log(`[test-sync] Starting ${runType} sync for ${Object.keys(keyMap).length} workspaces`);
   console.log(`[test-sync] Supabase: ${supabaseUrl}`);
   const start = Date.now();
 
-  await syncAllWorkspaces(keyMap, supabaseUrl, supabaseKey, isInboxRun);
+  await syncAllWorkspaces(keyMap, supabaseUrl, supabaseKey, runType);
 
   const elapsed = Math.round((Date.now() - start) / 1000);
   console.log(`[test-sync] Done in ${elapsed}s`);

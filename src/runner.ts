@@ -7,6 +7,7 @@
  * Usage:
  *   npx tsx src/runner.ts
  *   npx tsx src/runner.ts --inbox
+ *   npx tsx src/runner.ts --daily-metrics
  *
  * Env vars required:
  *   INSTANTLY_API_KEYS   - JSON string: { "workspace-slug": "api-key", ... }
@@ -15,10 +16,10 @@
  *
  * Optional env vars (set by workflow_dispatch inputs):
  *   WORKSPACE_FILTER     - comma-separated workspace slugs to sync (default: all)
- *   RUN_TYPE             - "full" or "inbox" (default: "full")
+ *   RUN_TYPE             - "full", "inbox", or "daily_metrics" (default: "full")
  */
 
-import { syncAllWorkspaces } from './sync';
+import { syncAllWorkspaces, type RunType } from './sync';
 import { parseInstantlyKeyMap } from './instantly-key-map';
 
 async function main() {
@@ -52,14 +53,19 @@ async function main() {
     console.log(`[runner] Workspace filter applied: ${Object.keys(keyMap).length}/${before} workspaces`);
   }
 
-  // Determine run type (--inbox flag or RUN_TYPE env var)
-  const runType = process.env.RUN_TYPE ?? 'full';
-  const isInboxRun = runType === 'inbox' || process.argv.includes('--inbox');
+  // Determine run type from --flag or RUN_TYPE env var. CLI flags win.
+  let runType: RunType = (process.env.RUN_TYPE as RunType) ?? 'full';
+  if (process.argv.includes('--daily-metrics')) runType = 'daily_metrics';
+  else if (process.argv.includes('--inbox')) runType = 'inbox';
+  if (runType !== 'full' && runType !== 'inbox' && runType !== 'daily_metrics') {
+    console.error(`[runner] Invalid RUN_TYPE: ${runType}`);
+    process.exit(1);
+  }
 
-  console.log(`[runner] Starting ${isInboxRun ? 'inbox' : 'full'} sync for ${Object.keys(keyMap).length} workspaces`);
+  console.log(`[runner] Starting ${runType} sync for ${Object.keys(keyMap).length} workspaces`);
   const start = Date.now();
 
-  await syncAllWorkspaces(keyMap, supabaseUrl, supabaseKey, isInboxRun);
+  await syncAllWorkspaces(keyMap, supabaseUrl, supabaseKey, runType);
 
   const elapsed = Math.round((Date.now() - start) / 1000);
   console.log(`[runner] Completed in ${elapsed}s`);

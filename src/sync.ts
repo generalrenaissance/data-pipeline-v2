@@ -126,6 +126,15 @@ async function cleanupMissingCampaigns(
   );
 }
 
+export type RunType = 'full' | 'inbox' | 'daily_metrics';
+
+/**
+ * Trailing-window length for daily_metrics run. Re-reads this many prior days
+ * on each run so Instantly's late updates (replies/opps settling) are captured
+ * in the table without a separate correction job.
+ */
+export const DAILY_METRICS_WINDOW_DAYS = 7;
+
 async function fetchCampaignTagsFromMappings(
   client: InstantlyClient,
   tagMap: Map<string, string>,
@@ -169,14 +178,21 @@ export async function syncWorkspace(
   workspaceSlug: string,
   apiKey: string,
   db: SupabaseClient,
-  isInboxRun: boolean,
+  runType: RunType,
 ): Promise<void> {
   const client = new InstantlyClient(apiKey);
   const today = new Date().toISOString().split('T')[0];
   const now = new Date().toISOString();
 
+  // Daily metrics run: pull /campaigns/analytics/daily per campaign for the
+  // trailing window. Does not touch campaign_metrics_daily or campaign_data.
+  if (runType === 'daily_metrics') {
+    await syncWorkspaceDailyMetrics(workspaceSlug, client, db, now);
+    return;
+  }
+
   // Inbox-only run (10:30 UTC cron)
-  if (isInboxRun) {
+  if (runType === 'inbox') {
     const accounts = await client.getAccounts();
     await db.upsert('sender_inboxes', accounts.map(a => ({
       email: a.email,
@@ -446,6 +462,69 @@ export async function syncWorkspace(
 }
 
 /**
+ * Per-campaign /daily fetch with trailing window. Writes to
+ * campaign_daily_metrics. Does not touch campaign_metrics_daily or
+ * campaign_data.
+ */
+export async function syncWorkspaceDailyMetrics(
+  workspaceSlug: string,
+  client: InstantlyClient,
+  db: SupabaseClient,
+  now: string,
+  windowDays: number = DAILY_METRICS_WINDOW_DAYS,
+): Promise<void> {
+  const endDate = now.split('T')[0];
+  const start = new Date(endDate);
+  start.setUTCDate(start.getUTCDate() - windowDays);
+  const startDate = start.toISOString().split('T')[0];
+
+  let campaigns: Awaited<ReturnType<typeof client.getCampaigns>>;
+  try {
+    campaigns = await client.getCampaigns();
+  } catch (err) {
+    console.warn(`[daily] ${workspaceSlug}: getCampaigns failed, retrying once...`);
+    campaigns = await client.getCampaigns();
+  }
+
+  const rows: unknown[] = [];
+  await runWithConcurrency(campaigns, CAMPAIGN_CONCURRENCY, async (campaign) => {
+    try {
+      const daily = await client.getCampaignDailyAnalytics(campaign.id, startDate, endDate);
+      for (const d of daily) {
+        rows.push({
+          campaign_id: campaign.id,
+          date: d.date,
+          sent: d.sent,
+          contacted: d.contacted,
+          new_leads_contacted: d.new_leads_contacted,
+          opened: d.opened,
+          unique_opened: d.unique_opened,
+          replies: d.replies,
+          unique_replies: d.unique_replies,
+          replies_automatic: d.replies_automatic,
+          unique_replies_automatic: d.unique_replies_automatic,
+          clicks: d.clicks,
+          unique_clicks: d.unique_clicks,
+          opportunities: d.opportunities,
+          unique_opportunities: d.unique_opportunities,
+          synced_at: now,
+        });
+      }
+    } catch (err) {
+      console.error(`[daily] ${workspaceSlug}: campaign ${campaign.id} (${campaign.name}):`, err);
+    }
+  });
+
+  if (rows.length > 0) {
+    await db.upsert('campaign_daily_metrics', rows, 'campaign_id,date');
+  }
+  console.log(
+    `[daily] ${workspaceSlug}: ${campaigns.length} campaigns, ` +
+    `${rows.length} daily rows upserted (window ${startDate}..${endDate})`
+  );
+}
+
+/**
  * Syncs all workspaces in keyMap. Called by runner.ts (GitHub Actions) and
  * can be imported by index.ts for /trigger endpoint if needed.
  */
@@ -453,25 +532,25 @@ export async function syncAllWorkspaces(
   keyMap: Record<string, string>,
   supabaseUrl: string,
   supabaseKey: string,
-  isInboxRun: boolean,
+  runType: RunType,
 ): Promise<void> {
   const db = new SupabaseClient(supabaseUrl, supabaseKey);
   const workspaces = Object.entries(keyMap);
   console.log(
-    `[syncAllWorkspaces] isInboxRun=${isInboxRun} workspaces=${workspaces.length}`
+    `[syncAllWorkspaces] runType=${runType} workspaces=${workspaces.length}`
   );
 
   await runWithConcurrency(workspaces, WORKSPACE_CONCURRENCY, async ([slug, apiKey]) => {
     try {
-      await syncWorkspace(slug, apiKey, db, isInboxRun);
+      await syncWorkspace(slug, apiKey, db, runType);
     } catch (err) {
       console.error(`[syncAllWorkspaces] Error on workspace ${slug}:`, err);
     }
   });
 
-  // Refresh step rollups once after all workspaces are written.
+  // Refresh step rollups once after all workspaces are written — full runs only.
   // Campaign-level __ALL__ rows are written directly in Node.
-  if (!isInboxRun) {
+  if (runType === 'full') {
     try {
       await db.rpc('refresh_campaign_rollups', {});
       console.log('[syncAllWorkspaces] Step rollups refreshed.');
