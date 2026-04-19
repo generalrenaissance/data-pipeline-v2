@@ -1,0 +1,47 @@
+name: Pipeline Health
+
+on:
+  schedule:
+    - cron: '0 * * * *'  # top of every hour
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'If true, print alerts instead of posting to Slack'
+        required: false
+        default: 'false'
+
+jobs:
+  health:
+    name: Check pipeline health
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+      actions: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run health check
+        run: |
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            npx tsx scripts/health-check.ts --dry-run
+          else
+            npx tsx scripts/health-check.ts
+          fi
+        env:
+          PIPELINE_SUPABASE_URL: ${{ secrets.PIPELINE_SUPABASE_URL }}
+          PIPELINE_SUPABASE_KEY: ${{ secrets.PIPELINE_SUPABASE_KEY }}
+          PIPELINE_HEALTH_SLACK_WEBHOOK: ${{ secrets.PIPELINE_HEALTH_SLACK_WEBHOOK }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
