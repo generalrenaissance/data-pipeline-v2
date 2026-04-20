@@ -5,7 +5,7 @@ on:
     - cron: '0 0,12-23 * * *'   # hourly 12:00-23:00 UTC (7am-6pm ET)
     - cron: '0 2,4,6,8,10 * * *' # even hours 02:00-10:00 UTC (9pm-5am ET)
     - cron: '30 10 * * *'         # inbox run 10:30 UTC (5:30am ET)
-    - cron: '15 5 * * *'          # daily_metrics run 05:15 UTC (1:15am ET, after Instantly settles prior ET day)
+    - cron: '0 1 * * *'           # daily_metrics run 01:00 UTC (9pm ET EDT / 8pm ET EST) — feeds observability dashboard
   workflow_dispatch:
     inputs:
       workspaces:
@@ -47,7 +47,7 @@ jobs:
             echo "type=${{ github.event.inputs.type || 'full' }}" >> $GITHUB_OUTPUT
           elif [ "${{ github.event.schedule }}" = "30 10 * * *" ]; then
             echo "type=inbox" >> $GITHUB_OUTPUT
-          elif [ "${{ github.event.schedule }}" = "15 5 * * *" ]; then
+          elif [ "${{ github.event.schedule }}" = "0 1 * * *" ]; then
             echo "type=daily_metrics" >> $GITHUB_OUTPUT
           else
             echo "type=full" >> $GITHUB_OUTPUT
