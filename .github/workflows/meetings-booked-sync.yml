@@ -20,5 +20,6 @@ jobs:
         env:
           SLACK_TOKEN: ${{ secrets.SLACK_TOKEN }}
           SLACK_COOKIE: ${{ secrets.SLACK_COOKIE }}
+          CC_SLACK_BOT_TOKEN: ${{ secrets.CC_SLACK_BOT_TOKEN }}
           PIPELINE_SUPABASE_URL: ${{ secrets.PIPELINE_SUPABASE_URL }}
           PIPELINE_SUPABASE_KEY: ${{ secrets.PIPELINE_SUPABASE_KEY }}

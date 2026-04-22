@@ -21,6 +21,7 @@ only. Do not commit credentials to the repository.
 - `PIPELINE_SUPABASE_URL`
 - `PIPELINE_SUPABASE_KEY`
 - `SLACK_TOKEN` and `SLACK_COOKIE` for meetings sync
+- `CC_SLACK_BOT_TOKEN` for the manual-review digest posted by meetings sync
 
 ## Local checks
 
@@ -28,5 +29,19 @@ only. Do not commit credentials to the repository.
 npm ci
 npm run typecheck
 ```
+
+## Meetings Sync Matcher
+
+The meetings workflow now resolves Slack campaign names in this order:
+
+1. `campaign_aliases` exact lookup for Sam-approved non-prefix mappings
+2. strict deterministic match where the only allowed difference is a leading
+   state prefix such as `ON -`, `OFF -`, `OLD -`, `[OLD]`, or leading emoji
+3. hard reject if pair number, CM tag, person code, or same-RG-different-product
+   rules conflict
+4. queue for manual review in `meetings_unmatched_queue` with the top
+   deterministic fuzzy candidates
+
+There is no LLM in the automated meetings pipeline.
 
 No license is granted by default.

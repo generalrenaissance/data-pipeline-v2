@@ -23,10 +23,14 @@ const repoRoot = path.resolve(__dirname, '..');
 loadDotenv(process.env.DOTENV_PATH ?? path.join(repoRoot, '.env'));
 
 async function main() {
-  const slackToken = process.env.SLACK_TOKEN;
-  const slackCookie = process.env.SLACK_COOKIE;
+  const slackToken = process.env.SLACK_TOKEN ?? process.env.SLACK_BROWSER_TOKEN;
+  const slackCookie = process.env.SLACK_COOKIE ?? process.env.SLACK_BROWSER_COOKIE;
   const supabaseUrl = process.env.PIPELINE_SUPABASE_URL ?? process.env.SUPABASE_URL;
-  const supabaseKey = process.env.PIPELINE_SUPABASE_KEY ?? process.env.SUPABASE_KEY;
+  const supabaseKey =
+    process.env.PIPELINE_SUPABASE_KEY ??
+    process.env.PIPELINE_SUPABASE_SERVICE_ROLE_KEY ??
+    process.env.SUPABASE_KEY;
+  const ccSlackBotToken = process.env.CC_SLACK_BOT_TOKEN;
 
   if (!slackToken) {
     console.error('[test-slack-sync] Missing SLACK_TOKEN');
@@ -37,7 +41,7 @@ async function main() {
     process.exit(1);
   }
 
-  await syncMeetingsBooked(slackToken, supabaseUrl, supabaseKey, slackCookie);
+  await syncMeetingsBooked(slackToken, supabaseUrl, supabaseKey, slackCookie, ccSlackBotToken);
   console.log('Done.');
 }
 
