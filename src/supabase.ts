@@ -78,6 +78,21 @@ export class SupabaseClient {
     return res.json() as Promise<unknown[]>;
   }
 
+  async selectAll(table: string, params: string, pageSize = 1000): Promise<unknown[]> {
+    const rows: unknown[] = [];
+
+    for (let offset = 0; ; offset += pageSize) {
+      const page = await this.select(
+        table,
+        `${params}${params ? '&' : ''}limit=${pageSize}&offset=${offset}`,
+      );
+      rows.push(...page);
+      if (page.length < pageSize) break;
+    }
+
+    return rows;
+  }
+
   async delete(table: string, params: string): Promise<void> {
     const res = await fetch(`${this.url}/rest/v1/${table}?${params}`, {
       method: 'DELETE',
