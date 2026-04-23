@@ -1,5 +1,6 @@
 import { InstantlyClient } from './instantly';
-import { loadCampaignTagCache } from './campaign-tag-cache';
+import { loadCampaignTagCache, upsertCampaignTagCache, type CampaignTagCacheRow } from './campaign-tag-cache';
+import { resolveCampaignTagSources } from './campaign-tags';
 import { SupabaseClient } from './supabase';
 import {
   classifyLeadSource,
@@ -135,28 +136,6 @@ export type RunType = 'full' | 'inbox' | 'daily_metrics' | 'today_metrics';
  */
 export const DAILY_METRICS_WINDOW_DAYS = 7;
 
-async function fetchCampaignTagsFromMappings(
-  client: InstantlyClient,
-  tagMap: Map<string, string>,
-  workspaceSlug: string,
-): Promise<Map<string, string[]>> {
-  const campaignTagsFromMappings = new Map<string, string[]>();
-  const allMappings = await client.getAllCustomTagMappings();
-  const campaignMappings = allMappings.filter(m => m.resource_type === 2);
-  for (const m of campaignMappings) {
-    const label = tagMap.get(m.tag_id);
-    if (!label) continue;
-    const existing = campaignTagsFromMappings.get(m.resource_id) ?? [];
-    existing.push(label);
-    campaignTagsFromMappings.set(m.resource_id, existing);
-  }
-  console.warn(
-    `[tags] ${workspaceSlug}: cache unavailable, fell back to live mappings ` +
-    `(${campaignMappings.length} campaign mappings / ${campaignTagsFromMappings.size} campaigns tagged)`
-  );
-  return campaignTagsFromMappings;
-}
-
 export async function runWithConcurrency<T, R>(
   items: T[],
   concurrency: number,
@@ -241,11 +220,17 @@ export async function syncWorkspace(
     campaignTagsFromCache = await loadCampaignTagCache(db, workspaceSlug);
     console.log(`[tags] ${workspaceSlug}: ${campaignTagsFromCache.size} cached rows loaded`);
     if (campaignTagsFromCache.size === 0 && campaigns.length > 0) {
-      campaignTagsFromCache = await fetchCampaignTagsFromMappings(client, tagMap, workspaceSlug);
+      console.warn(
+        `[tags] ${workspaceSlug}: cache empty, skipping live mapping crawl in hourly sync ` +
+        `and relying on campaign detail tags until the refresh workflow catches up`
+      );
     }
   } catch (err) {
-    console.warn(`[sync] ${workspaceSlug}: campaign_tag_cache unavailable, using live mappings:`, err);
-    campaignTagsFromCache = await fetchCampaignTagsFromMappings(client, tagMap, workspaceSlug);
+    console.warn(
+      `[sync] ${workspaceSlug}: campaign_tag_cache unavailable, continuing with campaign detail tags only:`,
+      err,
+    );
+    campaignTagsFromCache = new Map<string, string[]>();
   }
 
   // metricsRows feeds campaign_metrics_daily — the time-series archive,
@@ -254,6 +239,7 @@ export async function syncWorkspace(
 
   // V3: campaign_data rows (one per variant + __ALL__ rollup)
   const campaignDataRows: unknown[] = [];
+  const cacheBackfillRows: CampaignTagCacheRow[] = [];
   const campaignsTagged = new Set<string>();
 
   await runWithConcurrency(campaigns, CAMPAIGN_CONCURRENCY, async (campaign) => {
@@ -272,8 +258,22 @@ export async function syncWorkspace(
       const legacyTags = (detail.email_tag_list ?? [])
         .map(id => tagMap.get(id))
         .filter(Boolean) as string[];
-      const mappingTags = campaignTagsFromCache.get(campaign.id) ?? [];
-      const resolvedTags = Array.from(new Set([...legacyTags, ...mappingTags]));
+      const {
+        cachedTags,
+        resolvedTags,
+        shouldBackfillCache,
+      } = resolveCampaignTagSources(campaignTagsFromCache.get(campaign.id), legacyTags);
+      if (shouldBackfillCache) {
+        campaignTagsFromCache.set(campaign.id, resolvedTags);
+        cacheBackfillRows.push({
+          workspace_id: workspaceSlug,
+          campaign_id: campaign.id,
+          tags: resolvedTags,
+          refreshed_at: now,
+        });
+      } else if (cachedTags.length > 0) {
+        campaignTagsFromCache.set(campaign.id, cachedTags);
+      }
       if (resolvedTags.length > 0) {
         campaignsTagged.add(campaign.id);
       }
@@ -451,6 +451,17 @@ export async function syncWorkspace(
       console.log(`[v3] ${workspaceSlug}: ${campaignDataRows.length} campaign_data rows upserted`);
     } catch (err) {
       console.error(`[v3] ${workspaceSlug}: campaign_data write failed:`, err);
+    }
+  }
+
+  if (cacheBackfillRows.length > 0) {
+    try {
+      await upsertCampaignTagCache(db, cacheBackfillRows);
+      console.log(
+        `[tags] ${workspaceSlug}: backfilled ${cacheBackfillRows.length} cache rows from campaign detail tags`
+      );
+    } catch (err) {
+      console.error(`[tags] ${workspaceSlug}: campaign_tag_cache backfill failed:`, err);
     }
   }
 
