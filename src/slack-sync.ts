@@ -195,8 +195,8 @@ function trackRows(rowsByName: Map<string, MeetingNameStats>, rows: SlackSyncRow
 
 async function loadCampaigns(db: SupabaseClient): Promise<CampaignRecord[]> {
   const rows = await db.selectAll(
-    'campaigns',
-    'select=campaign_id,name&name=not.is.null',
+    'campaign_data',
+    'select=campaign_id,name:campaign_name&step=eq.__ALL__&variant=eq.__ALL__&campaign_name=not.is.null',
   ) as CampaignRecord[];
   return rows.filter(row => row.campaign_id && row.name);
 }
