@@ -11,6 +11,7 @@ import {
   LEAD_SOURCE_TAGS,
   parseCmName,
   parseRgBatchIds,
+  resolveCampaignManager,
   resolveBody,
   resolveSpintax,
   resolveSubject,
@@ -264,8 +265,6 @@ export async function syncWorkspace(
         client.getStepAnalytics(campaign.id),
       ]);
 
-      const cmName =
-        parseCmName(campaign.name) ?? WORKSPACE_CM_DEFAULTS[workspaceSlug] ?? null;
       // Merge legacy email_tag_list with authoritative custom-tag-mappings.
       // email_tag_list is a sparse secondary field; /custom-tag-mappings is
       // the source of truth for applied tags.
@@ -277,6 +276,7 @@ export async function syncWorkspace(
       if (resolvedTags.length > 0) {
         campaignsTagged.add(campaign.id);
       }
+      const cmName = resolveCampaignManager(workspaceSlug, campaign.name, resolvedTags);
       const rgBatchIds = parseRgBatchIds(campaign.name);
       const leadSource = classifyLeadSource(resolvedTags);
       const campaignStatus = String(detail.status ?? campaign.status ?? '');
