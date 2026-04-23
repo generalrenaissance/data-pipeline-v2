@@ -41,11 +41,9 @@ export class InstantlyClient {
     return results;
   }
 
-  /** All campaigns, or filtered by status (e.g. 'active') */
-  async getCampaigns(options?: { status?: string }): Promise<Campaign[]> {
-    const params: Record<string, string> = {};
-    if (options?.status) params.status = options.status;
-    return this.getAll<Campaign>('/campaigns', params);
+  /** All campaigns regardless of status */
+  async getCampaigns(): Promise<Campaign[]> {
+    return this.getAll<Campaign>('/campaigns');
   }
 
   /** Full campaign detail including sequences (copy) */

@@ -543,13 +543,15 @@ export async function syncWorkspaceTodayMetrics(
 ): Promise<void> {
   const today = now.split('T')[0];
 
-  let campaigns: Awaited<ReturnType<typeof client.getCampaigns>>;
+  let allCampaigns: Awaited<ReturnType<typeof client.getCampaigns>>;
   try {
-    campaigns = await client.getCampaigns({ status: 'active' });
+    allCampaigns = await client.getCampaigns();
   } catch (err) {
     console.warn(`[today] ${workspaceSlug}: getCampaigns failed, retrying once...`);
-    campaigns = await client.getCampaigns({ status: 'active' });
+    allCampaigns = await client.getCampaigns();
   }
+  // Status 1 = active in Instantly v2. Filter before making per-campaign calls.
+  const campaigns = allCampaigns.filter(c => String(c.status) === '1');
 
   const rows: unknown[] = [];
   await runWithConcurrency(campaigns, CAMPAIGN_CONCURRENCY, async (campaign) => {
