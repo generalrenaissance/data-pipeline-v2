@@ -32,6 +32,9 @@ export interface QueueRecord {
   first_seen_at?: string | null;
   last_seen_at?: string | null;
   last_digest_at?: string | null;
+  resolved_campaign_id?: string | null;
+  resolved_at?: string | null;
+  applied_at?: string | null;
 }
 
 export interface MeetingNameStats {
@@ -566,6 +569,7 @@ export function buildResolvedQueuePatch(campaignId: string): Record<string, unkn
     review_status: 'resolved',
     resolved_campaign_id: campaignId,
     resolved_at: now,
+    applied_at: now,
     updated_at: now,
   };
 }

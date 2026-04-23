@@ -2,6 +2,7 @@ import {
   SEEDED_CAMPAIGN_ALIASES,
   type AliasRecord,
   type CampaignRecord,
+  type MatchResolverContext,
   type MeetingNameStats,
   type QueueRecord,
   buildQueueUpsert,
@@ -44,6 +45,8 @@ interface QueueDigestEntry {
   candidates: { campaign_name: string; score: number }[];
 }
 
+type MeetingsSyncDb = Pick<SupabaseClient, 'selectAll' | 'upsert' | 'update' | 'rpc'>;
+
 export async function syncMeetingsBooked(
   slackToken: string,
   supabaseUrl: string,
@@ -73,13 +76,35 @@ export async function syncMeetingsBooked(
     }
   }
 
+  const [campaigns, initialAliases] = await Promise.all([
+    loadCampaigns(db),
+    loadAliases(db),
+  ]);
+  let context = buildResolverContext(campaigns, initialAliases);
+  const manualApplied = await applyManualResolutions(db, context);
+  if (manualApplied > 0) {
+    const aliases = await loadAliases(db);
+    context = buildResolverContext(campaigns, aliases);
+  }
+
   if (rowsByName.size === 0) {
-    console.log('[slack-sync] No candidate names to match');
+    if (manualApplied === 0) {
+      console.log('[slack-sync] No candidate names to match');
+      return;
+    }
+
+    const rolled = await db.rpc('rollup_meetings_booked', {});
+    console.log(`[slack-sync] Applied ${manualApplied} manual resolution${manualApplied === 1 ? '' : 's'}`);
+    console.log(`[slack-sync] Rollup: ${rolled} campaign_data rows updated`);
     return;
   }
 
-  const digestEntries = await matchRecentNames(db, rowsByName, ccSlackBotToken);
+  const queueByName = await loadQueue(db);
+  const digestEntries = await matchRecentNames(db, rowsByName, context, queueByName, ccSlackBotToken);
   console.log(`[slack-sync] Processed ${rowsByName.size} unique names across ${totalRows} rows`);
+  if (manualApplied > 0) {
+    console.log(`[slack-sync] Applied ${manualApplied} manual resolution${manualApplied === 1 ? '' : 's'}`);
+  }
 
   if (digestEntries.length > 0 && ccSlackBotToken) {
     await postCcSamDigest(ccSlackBotToken, digestEntries);
@@ -218,7 +243,7 @@ async function loadQueue(db: SupabaseClient): Promise<Map<string, QueueRecord>> 
   try {
     const rows = await db.selectAll(
       'meetings_unmatched_queue',
-      'select=campaign_name_raw,candidate_hash,review_status,queue_reason,top_candidates,occurrence_count,source_channels,first_seen_at,last_seen_at,last_digest_at',
+      'select=campaign_name_raw,candidate_hash,review_status,queue_reason,top_candidates,occurrence_count,source_channels,first_seen_at,last_seen_at,last_digest_at,resolved_campaign_id,resolved_at,applied_at',
     ) as QueueRecord[];
     return new Map(rows.map(row => [row.campaign_name_raw, row]));
   } catch (error) {
@@ -227,17 +252,71 @@ async function loadQueue(db: SupabaseClient): Promise<Map<string, QueueRecord>> 
   }
 }
 
+export async function applyManualResolutions(
+  db: MeetingsSyncDb,
+  context: MatchResolverContext,
+): Promise<number> {
+  const rows = await db.selectAll(
+    'meetings_unmatched_queue',
+    'select=campaign_name_raw,resolved_campaign_id,review_status,applied_at&review_status=eq.resolved&resolved_campaign_id=not.is.null&applied_at=is.null',
+  ) as QueueRecord[];
+  let applied = 0;
+
+  for (const row of rows) {
+    const campaignId = row.resolved_campaign_id;
+    if (!campaignId) continue;
+
+    const campaign = context.campaignMap.get(campaignId);
+    if (!campaign) {
+      console.warn(
+        `[slack-sync] manual resolution skipped: ${row.campaign_name_raw} -> ${campaignId} not found in live campaign_data`,
+      );
+      continue;
+    }
+
+    await db.upsert(
+      'campaign_aliases',
+      [{
+        alias: row.campaign_name_raw,
+        campaign_id: campaignId,
+        note: `Manual resolution ${new Date().toISOString().slice(0, 10)}`,
+        created_by: 'sam',
+      }],
+      'alias',
+    );
+
+    await db.update(
+      'meetings_booked_raw',
+      `campaign_name_raw=eq.${encodeURIComponent(row.campaign_name_raw)}&campaign_id=is.null`,
+      {
+        campaign_id: campaignId,
+        match_method: 'manual_alias',
+        match_confidence: 1,
+      },
+    );
+
+    await db.update(
+      'meetings_unmatched_queue',
+      `campaign_name_raw=eq.${encodeURIComponent(row.campaign_name_raw)}`,
+      {
+        applied_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+    );
+
+    applied += 1;
+  }
+
+  return applied;
+}
+
 async function matchRecentNames(
-  db: SupabaseClient,
+  db: MeetingsSyncDb,
   rowsByName: Map<string, MeetingNameStats>,
+  context: MatchResolverContext,
+  queueByName: Map<string, QueueRecord>,
   ccSlackBotToken?: string,
 ): Promise<QueueDigestEntry[]> {
-  const [campaigns, aliases, queueByName] = await Promise.all([
-    loadCampaigns(db),
-    loadAliases(db),
-    loadQueue(db),
-  ]);
-  const context = buildResolverContext(campaigns, aliases);
   const digestEntries: QueueDigestEntry[] = [];
 
   for (const [rawName, stats] of rowsByName) {
