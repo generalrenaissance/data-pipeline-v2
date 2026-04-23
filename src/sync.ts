@@ -126,7 +126,7 @@ async function cleanupMissingCampaigns(
   );
 }
 
-export type RunType = 'full' | 'inbox' | 'daily_metrics';
+export type RunType = 'full' | 'inbox' | 'daily_metrics' | 'today_metrics';
 
 /**
  * Trailing-window length for daily_metrics run. Re-reads this many prior days
@@ -188,6 +188,12 @@ export async function syncWorkspace(
   // trailing window. Does not touch campaign_metrics_daily or campaign_data.
   if (runType === 'daily_metrics') {
     await syncWorkspaceDailyMetrics(workspaceSlug, client, db, now);
+    return;
+  }
+
+  // Intraday metrics run: active campaigns only, today's date only.
+  if (runType === 'today_metrics') {
+    await syncWorkspaceTodayMetrics(workspaceSlug, client, db, now);
     return;
   }
 
@@ -521,6 +527,65 @@ export async function syncWorkspaceDailyMetrics(
   console.log(
     `[daily] ${workspaceSlug}: ${campaigns.length} campaigns, ` +
     `${rows.length} daily rows upserted (window ${startDate}..${endDate})`
+  );
+}
+
+/**
+ * Intraday today-only fetch: active campaigns only, today's date.
+ * Designed for hourly runs to keep campaign_daily_metrics current during
+ * the sending day without the cost of a full 7-day trailing window.
+ */
+export async function syncWorkspaceTodayMetrics(
+  workspaceSlug: string,
+  client: InstantlyClient,
+  db: SupabaseClient,
+  now: string,
+): Promise<void> {
+  const today = now.split('T')[0];
+
+  let campaigns: Awaited<ReturnType<typeof client.getCampaigns>>;
+  try {
+    campaigns = await client.getCampaigns({ status: 'active' });
+  } catch (err) {
+    console.warn(`[today] ${workspaceSlug}: getCampaigns failed, retrying once...`);
+    campaigns = await client.getCampaigns({ status: 'active' });
+  }
+
+  const rows: unknown[] = [];
+  await runWithConcurrency(campaigns, CAMPAIGN_CONCURRENCY, async (campaign) => {
+    try {
+      const daily = await client.getCampaignDailyAnalytics(campaign.id, today, today);
+      for (const d of daily) {
+        rows.push({
+          campaign_id: campaign.id,
+          date: d.date,
+          sent: d.sent,
+          contacted: d.contacted,
+          new_leads_contacted: d.new_leads_contacted,
+          opened: d.opened,
+          unique_opened: d.unique_opened,
+          replies: d.replies,
+          unique_replies: d.unique_replies,
+          replies_automatic: d.replies_automatic,
+          unique_replies_automatic: d.unique_replies_automatic,
+          clicks: d.clicks,
+          unique_clicks: d.unique_clicks,
+          opportunities: d.opportunities,
+          unique_opportunities: d.unique_opportunities,
+          synced_at: now,
+        });
+      }
+    } catch (err) {
+      console.error(`[today] ${workspaceSlug}: campaign ${campaign.id} (${campaign.name}):`, err);
+    }
+  });
+
+  if (rows.length > 0) {
+    await db.upsert('campaign_daily_metrics', rows, 'campaign_id,date');
+  }
+  console.log(
+    `[today] ${workspaceSlug}: ${campaigns.length} active campaigns, ` +
+    `${rows.length} rows upserted for ${today}`
   );
 }
 

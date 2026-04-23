@@ -55,9 +55,10 @@ async function main() {
 
   // Determine run type from --flag or RUN_TYPE env var. CLI flags win.
   let runType: RunType = (process.env.RUN_TYPE as RunType) ?? 'full';
-  if (process.argv.includes('--daily-metrics')) runType = 'daily_metrics';
+  if (process.argv.includes('--today-metrics')) runType = 'today_metrics';
+  else if (process.argv.includes('--daily-metrics')) runType = 'daily_metrics';
   else if (process.argv.includes('--inbox')) runType = 'inbox';
-  if (runType !== 'full' && runType !== 'inbox' && runType !== 'daily_metrics') {
+  if (runType !== 'full' && runType !== 'inbox' && runType !== 'daily_metrics' && runType !== 'today_metrics') {
     console.error(`[runner] Invalid RUN_TYPE: ${runType}`);
     process.exit(1);
   }
