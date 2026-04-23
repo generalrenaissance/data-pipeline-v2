@@ -44,4 +44,10 @@ The meetings workflow now resolves Slack campaign names in this order:
 
 There is no LLM in the automated meetings pipeline.
 
+Manual review is currently SQL-driven. Sam resolves a queued raw name by writing
+`resolved_campaign_id` + `review_status='resolved'` on
+`meetings_unmatched_queue`, and the next meetings sync run turns that into a
+sticky alias in `campaign_aliases`, backfills unresolved `meetings_booked_raw`
+rows for the same raw name, and reruns the rollup.
+
 No license is granted by default.
