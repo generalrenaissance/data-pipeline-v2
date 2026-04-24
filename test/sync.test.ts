@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   GHOST_CLEANUP_MAX_PER_WORKSPACE,
+  buildStoredCampaignTags,
   buildGhostCleanupPlan,
   type WorkspaceCampaignRollup,
 } from '../src/sync';
@@ -65,4 +66,13 @@ test('buildGhostCleanupPlan refuses cleanup when the missing set exceeds the cap
   );
   assert.equal(overCapPlan.skipReason, 'over_cap');
   assert.equal(overCapPlan.missing.length, GHOST_CLEANUP_MAX_PER_WORKSPACE + 1);
+});
+
+test('buildStoredCampaignTags keeps raw cached tags for safekeeping only', () => {
+  assert.deepEqual(
+    buildStoredCampaignTags([' Pair 1 ', 'RG123', 'RG123']),
+    ['Pair 1', 'RG123'],
+  );
+  assert.equal(buildStoredCampaignTags(undefined), null);
+  assert.equal(buildStoredCampaignTags(['  ', '\t']), null);
 });
