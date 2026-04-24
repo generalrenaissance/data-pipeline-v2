@@ -57,15 +57,68 @@ export function resolveSubject(raw: string): string {
   return resolveSpintax(raw.replace(/<[^>]+>/g, '').trim());
 }
 
-/**
- * Whitelist of known CM names. Used to validate regex matches and avoid
- * false positives like "(copy)" or "(X)" being treated as CM names.
- */
-const KNOWN_CMS = new Set([
-  'EYVER', 'TOMI', 'CARLOS', 'BRENDAN', 'LEO', 'IDO',
-  'MARCOS', 'SHAAN', 'ANDRES', 'LAUTARO', 'ALEX', 'SAMUEL',
-  'DENVER', 'GRACE',
+const CANONICAL_CMS = new Set([
+  'ALEX',
+  'ANDRES',
+  'BRENDAN',
+  'CARLOS',
+  'EYVER',
+  'IDO',
+  'LAUTARO',
+  'LEO',
+  'MARCOS',
+  'SAM',
+  'SAMUEL',
+  'SHAAN',
+  'TOMI',
 ]);
+
+const CM_ALIAS_MAP: Record<string, string> = {
+  ALEX: 'ALEX',
+  "ALEX'S CAMPAIGNS": 'ALEX',
+  ANDRE: 'ANDRES',
+  ANDRES: 'ANDRES',
+  "ANDRE'S CAMPAIGNS": 'ANDRES',
+  "ANDRES'S CAMPAIGNS": 'ANDRES',
+  BRENDAN: 'BRENDAN',
+  "BRENDAN'S CAMPAIGNS": 'BRENDAN',
+  CARLOS: 'CARLOS',
+  "CARLOS' CAMPAIGNS": 'CARLOS',
+  EYVER: 'EYVER',
+  'EYVER CAMPAIGNS': 'EYVER',
+  IDO: 'IDO',
+  "IDO'S CAMPAIGNS": 'IDO',
+  LAUTARO: 'LAUTARO',
+  'LAUTARO CAMPAIGNS': 'LAUTARO',
+  "LAUTARO'S CAMPAIGNS": 'LAUTARO',
+  LEO: 'LEO',
+  "LEO'S CAMPAIGNS": 'LEO',
+  "LEO'S CAMPAIGNS OFF": 'LEO',
+  MARCO: 'MARCOS',
+  MARCOS: 'MARCOS',
+  "MARCO'S CAMPAIGNS": 'MARCOS',
+  "MARCOS'S CAMPAIGNS": 'MARCOS',
+  SAM: 'SAM',
+  SAMUEL: 'SAMUEL',
+  "SAM'S CAMPAIGNS": 'SAM',
+  "SAMUEL'S CAMPAIGNS": 'SAMUEL',
+  SHAAN: 'SHAAN',
+  "SHAAN'S CAMPAIGNS": 'SHAAN',
+  TOMI: 'TOMI',
+  "TOMI'S CAMPAIGNS": 'TOMI',
+  "TOMI'S OFF CAMPAIGNS": 'TOMI',
+};
+
+const PAREN_CM_RE = /\(([A-Z]+)\)/i;
+const MID_TOKEN_CM_RE = /-\s*([A-Z]+)\s*-/i;
+const DASH_CM_RE = /-\s*([A-Z]+)(?:\s+\d+)?(?:\s+\(COPY\))*\s*$/i;
+const TRAILING_CM_RE = /(?:^|[\s-])([A-Z]+)\s*$/i;
+
+export function normalizeCmName(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const normalized = raw.trim().toUpperCase();
+  return CM_ALIAS_MAP[normalized] ?? null;
+}
 
 /**
  * Parse CM name from campaign name using multiple pattern strategies.
@@ -82,17 +135,14 @@ const KNOWN_CMS = new Set([
  */
 export function parseCmName(campaignName: string): string | null {
   const upper = campaignName.toUpperCase();
+  const patterns = [PAREN_CM_RE, MID_TOKEN_CM_RE, DASH_CM_RE, TRAILING_CM_RE];
 
-  // Pattern 1: (NAME) optionally followed by RB, X, or whitespace at end
-  const parenMatch = upper.match(/\(([A-Z]+)\)\s*(?:RB|X)?\s*$/);
-  if (parenMatch && KNOWN_CMS.has(parenMatch[1])) {
-    return parenMatch[1];
-  }
-
-  // Pattern 2: dash/space then NAME optionally followed by number at end
-  const dashMatch = upper.match(/[-\s]([A-Z]{3,})\s*\d*\s*$/);
-  if (dashMatch && KNOWN_CMS.has(dashMatch[1])) {
-    return dashMatch[1];
+  for (const pattern of patterns) {
+    const match = upper.match(pattern);
+    const normalized = normalizeCmName(match?.[1]);
+    if (normalized && CANONICAL_CMS.has(normalized)) {
+      return normalized;
+    }
   }
 
   return null;
@@ -289,6 +339,19 @@ export function classifyTags(tags: string[]): TagClassification {
   return { rg_batch_tags, pair_tag, sender_tags, other_tags };
 }
 
+export function resolveCmFromTags(tags: string[]): string | null {
+  const owners = new Set<string>();
+
+  for (const tag of tags) {
+    const normalized = normalizeCmName(tag);
+    if (normalized) {
+      owners.add(normalized);
+    }
+  }
+
+  return owners.size === 1 ? Array.from(owners)[0] : null;
+}
+
 // ── Product Classification ─────────────────────────────────────────────────
 
 export function classifyProduct(campaignName: string, _tags: string[]): string {
@@ -306,6 +369,11 @@ export function deriveInfraType(workspaceSlug: string): 'outlook' | 'google' {
 
 // ── Workspace CM Defaults ──────────────────────────────────────────────────
 
+export const WORKSPACE_CM_HARD_RULES: Record<string, string> = {
+  'renaissance-3': 'SAM',
+  'renaissance-6': 'SAM',
+};
+
 /**
  * Workspace slug → default CM name fallback.
  * Used only when parseCmName returns null.
@@ -314,7 +382,7 @@ export function deriveInfraType(workspaceSlug: string): 'outlook' | 'google' {
  * because parseCmName handles them per-campaign.
  */
 export const WORKSPACE_CM_DEFAULTS: Record<string, string | null> = {
-  'renaissance-1': 'IDO',
+  'renaissance-1': null,
   'renaissance-2': 'EYVER',
   'renaissance-3': null,
   'renaissance-4': null,   // mixed: EYVER, ANDRES, CARLOS, ALEX, LEO
@@ -326,17 +394,45 @@ export const WORKSPACE_CM_DEFAULTS: Record<string, string | null> = {
   'the-gatekeepers': 'BRENDAN',
   'equinox': 'LEO',
   'outlook-1': 'IDO',
-  'outlook-2': 'MARCOS',
+  'outlook-2': null,
   'outlook-3': 'LEO',
   'prospects-power': 'SHAAN',
   'automated-applications': 'EYVER',
   'warm-leads': null,
   'section-125-1': 'IDO',
-  'section-125-2': null,
+  'section-125-2': 'IDO',
   'erc-1': null,
   'erc-2': null,
-  'the-eagles': 'LAUTARO',  // all campaigns are LAUTARO, parseCmName catches via pattern 2
+  'the-eagles': null,
 };
+
+export function resolveCampaignManager(
+  workspaceSlug: string,
+  campaignName: string,
+  tags: string[],
+): string | null {
+  const parsedCm = parseCmName(campaignName);
+  const tagCm = resolveCmFromTags(tags);
+  const explicitSamuel = parsedCm === 'SAMUEL' || tagCm === 'SAMUEL';
+
+  if (explicitSamuel) {
+    return 'SAMUEL';
+  }
+
+  const hardRule = WORKSPACE_CM_HARD_RULES[workspaceSlug];
+  if (hardRule) {
+    return hardRule;
+  }
+
+  if (workspaceSlug === 'erc-1') {
+    if (parsedCm === 'SAM' || tagCm === 'SAM') {
+      return 'SAM';
+    }
+    return parsedCm === 'SAMUEL' || tagCm === 'SAMUEL' ? 'SAMUEL' : 'IDO';
+  }
+
+  return parsedCm ?? tagCm ?? WORKSPACE_CM_DEFAULTS[workspaceSlug] ?? null;
+}
 
 /**
  * Workspace slug → human display name.
