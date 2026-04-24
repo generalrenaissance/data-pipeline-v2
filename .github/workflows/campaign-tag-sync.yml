@@ -2,7 +2,7 @@ name: Campaign Tag Sync
 
 on:
   schedule:
-    - cron: '15 5 * * 0'
+    - cron: '15 5 * * *'
   workflow_dispatch:
     inputs:
       workspace:
@@ -12,7 +12,40 @@ on:
         type: string
 
 jobs:
-  sync:
+  scheduled-sync:
+    if: github.event_name == 'schedule'
+    name: Refresh campaign tag cache (shard ${{ matrix.shard_index }}/4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        shard_index: [0, 1, 2, 3]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Sync campaign tags
+        run: npx tsx scripts/sync-campaign-tags.ts
+        env:
+          INSTANTLY_API_KEYS: ${{ secrets.INSTANTLY_API_KEYS }}
+          PIPELINE_SUPABASE_URL: ${{ secrets.PIPELINE_SUPABASE_URL }}
+          PIPELINE_SUPABASE_KEY: ${{ secrets.PIPELINE_SUPABASE_KEY }}
+          WORKSPACE_SHARD_INDEX: ${{ matrix.shard_index }}
+          WORKSPACE_SHARD_COUNT: '4'
+
+  dispatch-sync:
+    if: github.event_name == 'workflow_dispatch'
     name: Refresh campaign tag cache
     runs-on: ubuntu-latest
     timeout-minutes: 360

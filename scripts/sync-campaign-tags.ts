@@ -1,4 +1,5 @@
 import { loadCampaignTagCache, upsertCampaignTagCache, deleteStaleCampaignTagCache, type CampaignTagCacheRow } from '../src/campaign-tag-cache';
+import { selectWorkspacesForRefresh } from '../src/campaign-tags';
 import { InstantlyClient } from '../src/instantly';
 import { parseInstantlyKeyMap } from '../src/instantly-key-map';
 import { SupabaseClient } from '../src/supabase';
@@ -9,10 +10,21 @@ const {
   PIPELINE_SUPABASE_KEY,
   INSTANTLY_API_KEYS,
   WORKSPACE_FILTER,
+  WORKSPACE_SHARD_INDEX,
+  WORKSPACE_SHARD_COUNT,
 } = process.env;
 
 function toSlug(ws: string): string {
   return ws.toLowerCase().replace(/\s+/g, '-');
+}
+
+function parseOptionalInt(value: string | undefined, name: string): number | undefined {
+  if (!value) return undefined;
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`Invalid ${name}: ${value}`);
+  }
+  return parsed;
 }
 
 async function fetchCampaignTagRows(
@@ -84,13 +96,20 @@ async function main(): Promise<void> {
   const workspaceFilter = new Set(
     (WORKSPACE_FILTER ?? '').split(',').map((entry) => toSlug(entry.trim())).filter(Boolean),
   );
-  const filtered = workspaceFilter.size > 0
-    ? Object.fromEntries(Object.entries(parsed).filter(([slug]) => workspaceFilter.has(slug)))
-    : parsed;
+  const shardIndex = parseOptionalInt(WORKSPACE_SHARD_INDEX, 'WORKSPACE_SHARD_INDEX');
+  const shardCount = parseOptionalInt(WORKSPACE_SHARD_COUNT, 'WORKSPACE_SHARD_COUNT');
+  const filtered = selectWorkspacesForRefresh(parsed, workspaceFilter, shardIndex, shardCount);
 
   const db = new SupabaseClient(PIPELINE_SUPABASE_URL!, PIPELINE_SUPABASE_KEY!);
   let errors = 0;
-  console.log(`[tag-cache] Starting sync for ${Object.keys(filtered).length} workspaces`);
+  const selectionLabel = workspaceFilter.size > 0
+    ? `filter=${[...workspaceFilter].join(',')}`
+    : shardCount && shardCount > 1
+      ? `shard=${shardIndex ?? 0}/${shardCount}`
+      : 'full';
+  console.log(
+    `[tag-cache] Starting sync for ${Object.keys(filtered).length} workspaces (${selectionLabel})`
+  );
 
   for (const [workspaceSlug, apiKey] of Object.entries(filtered)) {
     try {
