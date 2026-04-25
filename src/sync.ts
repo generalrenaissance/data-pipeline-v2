@@ -17,6 +17,14 @@ export const WORKSPACE_CONCURRENCY = 3;
 export const GHOST_CLEANUP_MAX_PER_WORKSPACE = 20;
 export const GHOST_STATUS = 'deleted';
 
+/**
+ * Cold-start cap for new-campaign daily-metrics backfill. When a campaign
+ * appears in the workspace sweep with zero existing rows in
+ * campaign_daily_metrics, fetch up to this many days of history instead of
+ * the trailing-window default. Caps absolute API cost on rare runaway cases.
+ */
+export const DAILY_METRICS_COLD_START_DAYS = 90;
+
 export interface WorkspaceCampaignRollup {
   campaign_id: string;
   campaign_name: string;
@@ -65,6 +73,76 @@ export function buildStoredCampaignTags(cachedTags: string[] | undefined): strin
   ).sort();
 
   return tags.length > 0 ? tags : null;
+}
+
+/**
+ * For a set of campaign_ids, return the subset whose campaign_data rows are
+ * ALL marked status='deleted'. Mirrors the writer-side gate that prevents
+ * phantom-campaign rows in campaign_daily_metrics: Instantly's daily-analytics
+ * endpoint keeps returning data for ids long after the campaign is deleted,
+ * so we filter by canonical status from campaign_data. A campaign with NO
+ * rows in campaign_data (new/uncached) is NOT considered deleted — letting
+ * brand-new campaigns through is required for the cold-start backfill.
+ */
+async function fetchFullyDeletedCampaignIds(
+  db: SupabaseClient,
+  campaignIds: string[],
+): Promise<Set<string>> {
+  if (campaignIds.length === 0) return new Set();
+  // Chunk to keep PostgREST `in.()` filters under the URL length cap.
+  const chunkSize = 200;
+  const perCampaignStatuses = new Map<string, string[]>();
+  for (let i = 0; i < campaignIds.length; i += chunkSize) {
+    const chunk = campaignIds.slice(i, i + chunkSize);
+    const params = [
+      'select=campaign_id,status',
+      `campaign_id=in.${buildInFilter(chunk)}`,
+    ].join('&');
+    const rows = (await db.selectAll('campaign_data', params)) as {
+      campaign_id: string;
+      status: string;
+    }[];
+    for (const r of rows) {
+      const list = perCampaignStatuses.get(r.campaign_id) ?? [];
+      list.push(String(r.status ?? ''));
+      perCampaignStatuses.set(r.campaign_id, list);
+    }
+  }
+  const deleted = new Set<string>();
+  for (const [campaignId, statuses] of perCampaignStatuses) {
+    if (statuses.length > 0 && statuses.every(s => s === GHOST_STATUS)) {
+      deleted.add(campaignId);
+    }
+  }
+  return deleted;
+}
+
+/**
+ * Returns the subset of campaign_ids that already have at least one row in
+ * campaign_daily_metrics. Used by the daily-metrics sync to detect new
+ * campaigns and trigger a cold-start full-history backfill instead of the
+ * trailing-window pull (which would silently skip the campaign's first sends
+ * if those days had already aged out of the window before sync caught up).
+ */
+async function fetchCampaignIdsWithDailyHistory(
+  db: SupabaseClient,
+  campaignIds: string[],
+): Promise<Set<string>> {
+  if (campaignIds.length === 0) return new Set();
+  const chunkSize = 200;
+  const known = new Set<string>();
+  for (let i = 0; i < campaignIds.length; i += chunkSize) {
+    const chunk = campaignIds.slice(i, i + chunkSize);
+    const params = [
+      'select=campaign_id',
+      `campaign_id=in.${buildInFilter(chunk)}`,
+    ].join('&');
+    const rows = (await db.selectAll('campaign_daily_metrics', params)) as {
+      campaign_id: string;
+    }[];
+    for (const r of rows) known.add(r.campaign_id);
+  }
+  return known;
 }
 
 async function cleanupMissingCampaigns(
@@ -451,11 +529,16 @@ export async function syncWorkspaceDailyMetrics(
   db: SupabaseClient,
   now: string,
   windowDays: number = DAILY_METRICS_WINDOW_DAYS,
+  coldStartDays: number = DAILY_METRICS_COLD_START_DAYS,
 ): Promise<void> {
   const endDate = now.split('T')[0];
-  const start = new Date(endDate);
-  start.setUTCDate(start.getUTCDate() - windowDays);
-  const startDate = start.toISOString().split('T')[0];
+  const trailingStart = new Date(endDate);
+  trailingStart.setUTCDate(trailingStart.getUTCDate() - windowDays);
+  const trailingStartDate = trailingStart.toISOString().split('T')[0];
+
+  const coldStart = new Date(endDate);
+  coldStart.setUTCDate(coldStart.getUTCDate() - coldStartDays);
+  const coldStartDate = coldStart.toISOString().split('T')[0];
 
   let campaigns: Awaited<ReturnType<typeof client.getCampaigns>>;
   try {
@@ -465,10 +548,31 @@ export async function syncWorkspaceDailyMetrics(
     campaigns = await client.getCampaigns();
   }
 
+  const campaignIds = campaigns.map(c => c.id);
+  const [deletedIds, knownIds] = await Promise.all([
+    fetchFullyDeletedCampaignIds(db, campaignIds),
+    fetchCampaignIdsWithDailyHistory(db, campaignIds),
+  ]);
+
   const rows: unknown[] = [];
+  let skippedDeleted = 0;
+  let coldStartCount = 0;
   await runWithConcurrency(campaigns, CAMPAIGN_CONCURRENCY, async (campaign) => {
+    if (deletedIds.has(campaign.id)) {
+      skippedDeleted += 1;
+      return;
+    }
+    const isColdStart = !knownIds.has(campaign.id);
+    const startDate = isColdStart ? coldStartDate : trailingStartDate;
     try {
       const daily = await client.getCampaignDailyAnalytics(campaign.id, startDate, endDate);
+      if (isColdStart) {
+        coldStartCount += 1;
+        console.log(
+          `[daily] ${workspaceSlug}: cold-start backfill for ${campaign.id} ` +
+          `(${campaign.name}) window ${startDate}..${endDate} -> ${daily.length} rows`
+        );
+      }
       for (const d of daily) {
         rows.push({
           campaign_id: campaign.id,
@@ -498,8 +602,9 @@ export async function syncWorkspaceDailyMetrics(
     await db.upsert('campaign_daily_metrics', rows, 'campaign_id,date');
   }
   console.log(
-    `[daily] ${workspaceSlug}: ${campaigns.length} campaigns, ` +
-    `${rows.length} daily rows upserted (window ${startDate}..${endDate})`
+    `[daily] ${workspaceSlug}: ${campaigns.length} campaigns ` +
+    `(${skippedDeleted} skipped as deleted, ${coldStartCount} cold-start), ` +
+    `${rows.length} daily rows upserted (trailing ${trailingStartDate}..${endDate})`
   );
 }
 
@@ -526,8 +631,19 @@ export async function syncWorkspaceTodayMetrics(
   // Status 1 = active in Instantly v2. Filter before making per-campaign calls.
   const campaigns = allCampaigns.filter(c => String(c.status) === '1');
 
+  // Defense-in-depth: drop any campaign whose campaign_data rollup is fully
+  // status='deleted'. Instantly occasionally keeps returning daily rows for
+  // ids long after the campaign is deleted in the workspace; the canonical
+  // status lives in campaign_data.
+  const deletedIds = await fetchFullyDeletedCampaignIds(db, campaigns.map(c => c.id));
+
   const rows: unknown[] = [];
+  let skippedDeleted = 0;
   await runWithConcurrency(campaigns, CAMPAIGN_CONCURRENCY, async (campaign) => {
+    if (deletedIds.has(campaign.id)) {
+      skippedDeleted += 1;
+      return;
+    }
     try {
       const daily = await client.getCampaignDailyAnalytics(campaign.id, today, today);
       for (const d of daily) {
@@ -559,8 +675,8 @@ export async function syncWorkspaceTodayMetrics(
     await db.upsert('campaign_daily_metrics', rows, 'campaign_id,date');
   }
   console.log(
-    `[today] ${workspaceSlug}: ${campaigns.length} active campaigns, ` +
-    `${rows.length} rows upserted for ${today}`
+    `[today] ${workspaceSlug}: ${campaigns.length} active campaigns ` +
+    `(${skippedDeleted} skipped as deleted), ${rows.length} rows upserted for ${today}`
   );
 }
 
