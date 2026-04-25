@@ -1,7 +1,11 @@
 import type { Campaign, StepAnalytics, CampaignAnalytics, CampaignDailyAnalytics, Account, Tag, TagMapping } from './types';
+import type { AccountDailyMetric } from './infra/types';
 
 export class InstantlyClient {
   private baseUrl = 'https://api.instantly.ai/api/v2';
+
+  apiCallCount = 0;
+  rateLimitEvents = 0;
 
   constructor(private apiKey: string) {}
 
@@ -10,22 +14,61 @@ export class InstantlyClient {
     if (params) {
       for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
     }
+    this.apiCallCount++;
     let res = await fetch(url.toString(), {
       headers: { Authorization: `Bearer ${this.apiKey}` },
       signal: AbortSignal.timeout(30_000),
     });
     if (res.status === 429) {
+      this.rateLimitEvents++;
       await new Promise(r => setTimeout(r, 2000));
+      this.apiCallCount++;
       res = await fetch(url.toString(), {
         headers: { Authorization: `Bearer ${this.apiKey}` },
         signal: AbortSignal.timeout(30_000),
       });
+      if (res.status === 429) this.rateLimitEvents++;
     }
     if (!res.ok) {
       const body = await res.text().catch(() => '');
       throw new Error(`Instantly ${res.status} on GET ${path}: ${body}`);
     }
     return res.json() as Promise<T>;
+  }
+
+  private async getWithRetry<T>(path: string, params?: Record<string, string>): Promise<T> {
+    const url = new URL(`${this.baseUrl}${path}`);
+    if (params) {
+      for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+    }
+    const maxAttempts = 5;
+    let lastBody = '';
+    let lastStatus = 0;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      this.apiCallCount++;
+      const res = await fetch(url.toString(), {
+        headers: { Authorization: `Bearer ${this.apiKey}` },
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (res.status === 429) {
+        this.rateLimitEvents++;
+        lastStatus = 429;
+        if (attempt < maxAttempts - 1) {
+          const base = 500 * Math.pow(2, attempt);
+          const jitter = Math.floor(Math.random() * 250);
+          await new Promise(r => setTimeout(r, base + jitter));
+          continue;
+        }
+        lastBody = await res.text().catch(() => '');
+        break;
+      }
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        throw new Error(`Instantly ${res.status} on GET ${path}: ${body}`);
+      }
+      return res.json() as Promise<T>;
+    }
+    throw new Error(`Instantly ${lastStatus} on GET ${path} after ${maxAttempts} attempts: ${lastBody}`);
   }
 
   private async getAll<T>(path: string, params?: Record<string, string>): Promise<T[]> {
@@ -142,5 +185,66 @@ export class InstantlyClient {
    */
   async getAllCustomTagMappings(): Promise<TagMapping[]> {
     return this.getAll<TagMapping>('/custom-tag-mappings');
+  }
+
+  /**
+   * Raw account inventory with all server-side fields preserved (e.g.
+   * `provider_code`, `workspace`). Paginates `/accounts` via `starting_after`.
+   * Optional `search` narrows by domain or partial email.
+   */
+  async getAccountsRaw(params?: { search?: string }): Promise<Account[]> {
+    const results: Account[] = [];
+    let cursor: string | undefined;
+    do {
+      const p: Record<string, string> = { limit: '100' };
+      if (params?.search) p.search = params.search;
+      if (cursor) p.starting_after = cursor;
+      const raw = await this.getWithRetry<{ items?: Account[]; next_starting_after?: string } | Account[]>(
+        '/accounts',
+        p,
+      );
+      const items: Account[] = Array.isArray(raw) ? raw : (raw.items ?? []);
+      results.push(...items);
+      cursor = Array.isArray(raw) ? undefined : (raw.next_starting_after ?? undefined);
+    } while (cursor);
+    return results;
+  }
+
+  /**
+   * Workspace-wide daily account analytics for a date window.
+   *
+   * Phase 0 (2026-04-24) verified the v2 API ignores all email-filter param
+   * variants (`emails`, `email`, `email_account`, `account`, `accounts`,
+   * `emails[]`) and always returns the full workspace dump. POST is unsupported
+   * (404). One GET per workspace per window is the only viable shape.
+   * Filter to specific accounts client-side after the call.
+   */
+  async getWorkspaceAccountDailyAnalytics(params: {
+    startDate: string;
+    endDate: string;
+  }): Promise<AccountDailyMetric[]> {
+    const raw = await this.getWithRetry<unknown>('/accounts/analytics/daily', {
+      start_date: params.startDate,
+      end_date: params.endDate,
+    });
+    const items: any[] = Array.isArray(raw) ? raw : ((raw as any)?.items ?? []);
+    return items
+      .filter(r => r && r.email_account !== '')
+      .map(r => ({
+        date: String(r.date ?? ''),
+        email_account: String(r.email_account ?? ''),
+        sent: r.sent ?? 0,
+        bounced: r.bounced ?? 0,
+        contacted: r.contacted ?? 0,
+        new_leads_contacted: r.new_leads_contacted ?? 0,
+        opened: r.opened ?? 0,
+        unique_opened: r.unique_opened ?? 0,
+        replies: r.replies ?? 0,
+        unique_replies: r.unique_replies ?? 0,
+        replies_automatic: r.replies_automatic ?? 0,
+        unique_replies_automatic: r.unique_replies_automatic ?? 0,
+        clicks: r.clicks ?? 0,
+        unique_clicks: r.unique_clicks ?? 0,
+      }));
   }
 }

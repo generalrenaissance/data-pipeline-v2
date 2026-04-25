@@ -1,0 +1,93 @@
+name: Infra Domain Sync
+
+# Phase 6 of the domain-infra-sync build (specs/2026-04-24-domain-infra-sync-build-plan.md).
+# workflow_dispatch ONLY for v1. Cron schedules are intentionally omitted; they
+# get added in Phase 10 only after a manual full run is reviewed by Sam.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Sync mode'
+        required: true
+        default: 'inventory'
+        type: choice
+        options:
+          - phase0
+          - inventory
+          - metrics-incremental
+          - metrics-backfill
+          - aggregate-only
+          - full
+      workspace:
+        description: 'Single workspace slug (leave blank for all in-scope)'
+        required: false
+        default: ''
+      start_date:
+        description: 'Start date YYYY-MM-DD (metrics-backfill only)'
+        required: false
+        default: ''
+      end_date:
+        description: 'End date YYYY-MM-DD (metrics-backfill only)'
+        required: false
+        default: ''
+      days:
+        description: 'Trailing days for metrics-incremental (default 7)'
+        required: false
+        default: '7'
+
+jobs:
+  sync:
+    name: Infra domain sync
+    runs-on: ubuntu-latest
+    # Inventory pagination is heavy: outlook-3 alone has ~164k accounts and
+    # takes ~6.5 min (1646 paginated /accounts calls). Full 22-workspace
+    # inventory takes ~2.5 hr. Keep this generous; per-workspace dispatch is
+    # the recommended production pattern.
+    timeout-minutes: 240
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build CLI args
+        id: args
+        env:
+          MODE: ${{ github.event.inputs.mode }}
+          WORKSPACE: ${{ github.event.inputs.workspace }}
+          START_DATE: ${{ github.event.inputs.start_date }}
+          END_DATE: ${{ github.event.inputs.end_date }}
+          DAYS: ${{ github.event.inputs.days }}
+        run: |
+          ARGS="--mode $MODE"
+          if [ -n "$WORKSPACE" ]; then
+            ARGS="$ARGS --workspace $WORKSPACE"
+          fi
+          if [ "$MODE" = "metrics-backfill" ]; then
+            if [ -z "$START_DATE" ] || [ -z "$END_DATE" ]; then
+              echo "::error::metrics-backfill requires both start_date and end_date"
+              exit 1
+            fi
+            ARGS="$ARGS --start $START_DATE --end $END_DATE"
+          fi
+          if [ "$MODE" = "metrics-incremental" ] || [ "$MODE" = "full" ]; then
+            ARGS="$ARGS --days ${DAYS:-7}"
+          fi
+          echo "args=$ARGS" >> $GITHUB_OUTPUT
+          echo "Resolved CLI: npx tsx scripts/sync-infra-domains.ts $ARGS"
+
+      - name: Run infra sync
+        run: npx tsx scripts/sync-infra-domains.ts ${{ steps.args.outputs.args }}
+        env:
+          INSTANTLY_API_KEYS: ${{ secrets.INSTANTLY_API_KEYS }}
+          PIPELINE_SUPABASE_URL: ${{ secrets.PIPELINE_SUPABASE_URL }}
+          PIPELINE_SUPABASE_KEY: ${{ secrets.PIPELINE_SUPABASE_KEY }}
