@@ -1,0 +1,37 @@
+name: LLM Meetings Matcher Watchdog
+
+# The matcher runs as a Claude Code scheduled routine at 06:00 UTC daily
+# (trig_01WNisJzJBbrb2Ja7Bhc9oSg). It has hit silent stream-idle timeouts
+# (2026-04-24, 2026-04-26) producing no Slack summary post. This watchdog runs
+# 30 min after the scheduled start time, scans #cc-sam for the summary message,
+# and posts a fallback alert if none is found.
+
+on:
+  schedule:
+    # 30 min after 06:00 UTC matcher start. Adjust if the routine's schedule
+    # changes. Lookback inside the script is 60 min by default — covers up to
+    # ~30 min of legitimate runtime variance.
+    - cron: '30 6 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run — log decision but do not post fallback'
+        required: false
+        default: 'false'
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - name: Check for matcher summary post
+        env:
+          CC_SLACK_BOT_TOKEN: ${{ secrets.CC_SLACK_BOT_TOKEN }}
+          WATCHDOG_DRY_RUN: ${{ inputs.dry_run == 'true' && '1' || '' }}
+        run: npx tsx scripts/llm-matcher-watchdog.ts
