@@ -38,6 +38,317 @@ export interface GhostCleanupPlan {
   skipReason: 'empty_fetch' | 'over_cap' | null;
 }
 
+/**
+ * Minimal row shape used by the campaign_data winner-pick coalesce step.
+ * Both newly-built sync rows and rows fetched from campaign_data are reduced
+ * to this shape before ranking, so the pure planner does not depend on the
+ * full V3 column set.
+ */
+export interface CampaignDataDedupeRow {
+  campaign_id: string;
+  campaign_name: string;
+  workspace_id: string;
+  step: string;
+  variant: string;
+  emails_sent: number | null;
+  synced_at: string | null;
+}
+
+export interface CampaignDataWinnerPickPlan {
+  /** campaign_ids that already exist in campaign_data and should be deleted
+   *  (plus FK-reassigned) because a different campaign_id with the same
+   *  (workspace_id, campaign_name, step, variant) ranks higher under the
+   *  winner-pick rule.
+   */
+  loserCampaignIds: string[];
+  /** Diagnostic detail for each (workspace_id, campaign_name) collision the
+   *  planner resolved. One entry per surviving winner; loserCampaignIds for
+   *  that group is non-empty.
+   */
+  resolutions: Array<{
+    workspace_id: string;
+    campaign_name: string;
+    step: string;
+    variant: string;
+    winner_id: string;
+    losers: string[];
+  }>;
+}
+
+/**
+ * Winner-pick rule (matches the SQL dedupe migrations 2026-04-26):
+ *   1. Highest emails_sent (NULLS treated as 0)
+ *   2. Tiebreak: most recent synced_at (DESC, NULLS LAST)
+ *
+ * The rule is applied per (workspace_id, campaign_name, step, variant)
+ * group. Multi-workspace duplicates (same campaign_name across different
+ * workspaces) are NEVER considered colliding — they are legitimately distinct
+ * campaigns and stay separate. Because the sync runs per-workspace, the
+ * incoming `newRows` always belong to a single workspace, but we still scope
+ * the rule by workspace_id defensively in case the helper is reused.
+ */
+function rankRow(a: CampaignDataDedupeRow, b: CampaignDataDedupeRow): number {
+  const aSent = a.emails_sent ?? 0;
+  const bSent = b.emails_sent ?? 0;
+  if (aSent !== bSent) return bSent - aSent; // DESC
+  const aSync = a.synced_at ?? '';
+  const bSync = b.synced_at ?? '';
+  if (aSync === bSync) return 0;
+  // Most recent first; missing synced_at sorts last.
+  if (!aSync) return 1;
+  if (!bSync) return -1;
+  return aSync < bSync ? 1 : -1;
+}
+
+/**
+ * Pure planner for the campaign_data winner-pick coalesce. Given the rows
+ * about to be upserted by this sync run and the rows already present in
+ * campaign_data for the same (workspace_id, campaign_name, step, variant)
+ * keys, return the campaign_ids whose existing rows should be deleted (and
+ * their FK references reassigned to the winner).
+ *
+ * Multi-workspace name collisions are excluded — the function only considers
+ * groups where every observed row shares a single workspace_id.
+ */
+export function buildCampaignDataWinnerPickPlan(
+  newRows: CampaignDataDedupeRow[],
+  existingRows: CampaignDataDedupeRow[],
+): CampaignDataWinnerPickPlan {
+  // Group rows by (workspace_id, campaign_name, step, variant) using a JSON
+  // tuple key so arbitrary characters in campaign_name (commas, spaces, etc.)
+  // can never collide with a delimiter.
+  const groupKey = (r: CampaignDataDedupeRow): string =>
+    JSON.stringify([r.workspace_id, r.campaign_name, r.step, r.variant]);
+  const xKeyOf = (r: CampaignDataDedupeRow): string =>
+    JSON.stringify([r.campaign_name, r.step, r.variant]);
+
+  const candidates = new Map<string, CampaignDataDedupeRow[]>();
+  const observedWorkspaces = new Map<string, Set<string>>();
+  const groupTuple = new Map<string, { workspace_id: string; campaign_name: string; step: string; variant: string }>();
+
+  const note = (rows: CampaignDataDedupeRow[]): void => {
+    for (const r of rows) {
+      const xKey = xKeyOf(r);
+      let ws = observedWorkspaces.get(xKey);
+      if (!ws) {
+        ws = new Set<string>();
+        observedWorkspaces.set(xKey, ws);
+      }
+      ws.add(r.workspace_id);
+
+      const k = groupKey(r);
+      let arr = candidates.get(k);
+      if (!arr) {
+        arr = [];
+        candidates.set(k, arr);
+      }
+      arr.push(r);
+      if (!groupTuple.has(k)) {
+        groupTuple.set(k, {
+          workspace_id: r.workspace_id,
+          campaign_name: r.campaign_name,
+          step: r.step,
+          variant: r.variant,
+        });
+      }
+    }
+  };
+
+  note(newRows);
+  note(existingRows);
+
+  const newCampaignIdsByKey = new Map<string, Set<string>>();
+  for (const r of newRows) {
+    const k = groupKey(r);
+    let s = newCampaignIdsByKey.get(k);
+    if (!s) {
+      s = new Set<string>();
+      newCampaignIdsByKey.set(k, s);
+    }
+    s.add(r.campaign_id);
+  }
+
+  const resolutions: CampaignDataWinnerPickPlan['resolutions'] = [];
+  const loserSet = new Set<string>();
+
+  for (const [key, rows] of candidates) {
+    if (rows.length < 2) continue;
+    const tuple = groupTuple.get(key);
+    if (!tuple) continue;
+    const xKey = JSON.stringify([tuple.campaign_name, tuple.step, tuple.variant]);
+    const ws = observedWorkspaces.get(xKey);
+    if (ws && ws.size > 1) continue; // multi-workspace — never coalesce
+
+    // Deduplicate by campaign_id (a row may appear in both newRows and
+    // existingRows if the sync re-touches the same campaign). Prefer the
+    // newRows copy because its emails_sent/synced_at are fresher.
+    const byId = new Map<string, CampaignDataDedupeRow>();
+    for (const r of rows) byId.set(r.campaign_id, r);
+    const distinct = Array.from(byId.values());
+    if (distinct.length < 2) continue;
+
+    distinct.sort(rankRow);
+    const winner = distinct[0];
+    const losers = distinct.slice(1).map(r => r.campaign_id);
+
+    // Only flag losers if at least one new-row campaign_id is in this group.
+    // Otherwise the collision is among pre-existing rows untouched by this
+    // sync — leaving cleanup to the migration / a later sync that does touch
+    // them. This keeps the per-sync delete blast radius bounded.
+    const newIdsHere = newCampaignIdsByKey.get(key);
+    if (!newIdsHere || newIdsHere.size === 0) continue;
+
+    for (const id of losers) loserSet.add(id);
+    resolutions.push({
+      workspace_id: tuple.workspace_id,
+      campaign_name: tuple.campaign_name,
+      step: tuple.step,
+      variant: tuple.variant,
+      winner_id: winner.campaign_id,
+      losers,
+    });
+  }
+
+  return {
+    loserCampaignIds: Array.from(loserSet),
+    resolutions,
+  };
+}
+
+/**
+ * Async wrapper: read existing campaign_data rows in the same workspace that
+ * could collide on (workspace_id, campaign_name, step='__ALL__',
+ * variant='__ALL__') with rows we're about to upsert; pick winners; reassign
+ * meetings_booked_raw / meetings_unmatched_queue FKs from loser → winner;
+ * delete loser rows from campaign_data.
+ *
+ * Scoped to the rollup row (step='__ALL__', variant='__ALL__') because the
+ * dedupe-detection key is the rollup. Per-step/variant rows for a loser
+ * campaign_id share that same campaign_id as PK, so deleting all of them
+ * here would over-delete legitimate sibling rows. Sibling rows for a loser
+ * campaign_id will simply stop being refreshed by future syncs (campaign no
+ * longer surfaced) and naturally age out via existing ghost-cleanup logic.
+ */
+export async function coalesceCampaignDataDupes(
+  workspaceSlug: string,
+  db: SupabaseClient,
+  newRows: CampaignDataDedupeRow[],
+): Promise<CampaignDataWinnerPickPlan> {
+  // Only the __ALL__ rollup is the dedupe-detection key. The per-step/variant
+  // rows belong to the same campaign_id, so the winner-pick decision at the
+  // rollup row dictates them.
+  const newRollupRows = newRows.filter(
+    r => r.step === '__ALL__' && r.variant === '__ALL__',
+  );
+  if (newRollupRows.length === 0) {
+    return { loserCampaignIds: [], resolutions: [] };
+  }
+
+  const candidateNames = Array.from(
+    new Set(newRollupRows.map(r => r.campaign_name)),
+  );
+  if (candidateNames.length === 0) {
+    return { loserCampaignIds: [], resolutions: [] };
+  }
+
+  // Fetch existing __ALL__/__ALL__ rows that share campaign_name with this
+  // sync's new rows AND live in this workspace. Workspace_id can show up as
+  // either the slug or the display name in legacy rows; check both.
+  const workspaceIds = [workspaceSlug, workspaceDisplayName(workspaceSlug)];
+  const existing: CampaignDataDedupeRow[] = [];
+
+  // Chunk by campaign_name to keep PostgREST URL length bounded.
+  const chunkSize = 50;
+  for (let i = 0; i < candidateNames.length; i += chunkSize) {
+    const chunk = candidateNames.slice(i, i + chunkSize);
+    const params = [
+      'select=campaign_id,campaign_name,workspace_id,step,variant,emails_sent,synced_at',
+      `workspace_id=in.${buildInFilter(workspaceIds)}`,
+      `campaign_name=in.${buildInFilter(chunk)}`,
+      'step=eq.__ALL__',
+      'variant=eq.__ALL__',
+    ].join('&');
+    const rows = (await db.selectAll('campaign_data', params)) as CampaignDataDedupeRow[];
+    existing.push(...rows);
+  }
+
+  // Normalize workspace_id on existing rows to the slug we're syncing under,
+  // so the planner's per-workspace partition matches new + existing.
+  const normalized = existing.map(r => ({ ...r, workspace_id: workspaceSlug }));
+
+  const plan = buildCampaignDataWinnerPickPlan(newRollupRows, normalized);
+  if (plan.loserCampaignIds.length === 0) {
+    return plan;
+  }
+
+  // Reassign meetings_booked_raw FKs from each loser to its winner.
+  // We can only PATCH per-winner because each loser has a different winner,
+  // and PostgREST doesn't expose CASE WHEN inside a PATCH body.
+  for (const r of plan.resolutions) {
+    if (r.losers.length === 0) continue;
+    const losersFilter = `campaign_id=in.${buildInFilter(r.losers)}`;
+    try {
+      await db.update('meetings_booked_raw', losersFilter, {
+        campaign_id: r.winner_id,
+      });
+    } catch (err) {
+      // FK reassignment must succeed before delete to preserve attribution
+      // invariants. If it fails, abort this resolution and leave the loser
+      // rows untouched. Next sync will retry.
+      console.error(
+        `[v3-coalesce] ${workspaceSlug}: meetings_booked_raw FK reassign failed for "${r.campaign_name}" (${r.losers.join(',')} → ${r.winner_id}):`,
+        err,
+      );
+      // Drop these losers from the deletion set.
+      for (const id of r.losers) {
+        const idx = plan.loserCampaignIds.indexOf(id);
+        if (idx >= 0) plan.loserCampaignIds.splice(idx, 1);
+      }
+      continue;
+    }
+
+    try {
+      await db.update(
+        'meetings_unmatched_queue',
+        `resolved_campaign_id=in.${buildInFilter(r.losers)}`,
+        { resolved_campaign_id: r.winner_id },
+      );
+    } catch (err) {
+      // Defensive — usually 0 rows. Log and continue.
+      console.warn(
+        `[v3-coalesce] ${workspaceSlug}: meetings_unmatched_queue reassign warning for "${r.campaign_name}":`,
+        err,
+      );
+    }
+  }
+
+  if (plan.loserCampaignIds.length === 0) {
+    return plan;
+  }
+
+  // Delete loser __ALL__/__ALL__ rows. Per-step/variant siblings of the
+  // loser campaign_id are intentionally left in place (see docblock).
+  try {
+    const params = [
+      `campaign_id=in.${buildInFilter(plan.loserCampaignIds)}`,
+      'step=eq.__ALL__',
+      'variant=eq.__ALL__',
+    ].join('&');
+    await db.delete('campaign_data', params);
+    console.log(
+      `[v3-coalesce] ${workspaceSlug}: deleted ${plan.loserCampaignIds.length} loser rollup rows ` +
+        `across ${plan.resolutions.length} (workspace,campaign_name) groups`,
+    );
+  } catch (err) {
+    console.error(
+      `[v3-coalesce] ${workspaceSlug}: campaign_data delete failed:`,
+      err,
+    );
+  }
+
+  return plan;
+}
+
 function quotePostgrest(value: string): string {
   return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 }
@@ -495,8 +806,38 @@ export async function syncWorkspace(
     await db.upsert('campaign_metrics_daily', metricsRows, 'campaign_id,step,variant,date');
   }
 
-  // Write to V3 campaign_data table (primary read target)
+  // Write to V3 campaign_data table (primary read target).
+  //
+  // Pre-upsert dedupe coalesce: campaign_data PK is (campaign_id, step,
+  // variant), but the dedupe-detection key downstream consumers (matcher,
+  // analytics) rely on is (workspace_id, campaign_name, step, variant).
+  // When Instantly returns multiple campaign_id UUIDs sharing the same
+  // campaign_name in the same workspace (recreate-after-delete pattern),
+  // a plain upsert produces structural duplicates that re-emerge within
+  // minutes of any Supabase-layer dedupe (see today's audit-trail SQL:
+  // sql/2026-04-26-campaign-data-dedupe-EXECUTED.sql and -c-EXECUTED.sql).
+  //
+  // Apply the same winner-pick rule used in the dedupe migrations
+  // (highest emails_sent, tiebreak most-recent synced_at) at write-time-zero,
+  // scoped to this workspace.
   if (campaignDataRows.length > 0) {
+    try {
+      const dedupeInputs = (campaignDataRows as Array<Record<string, unknown>>).map(r => ({
+        campaign_id: String(r.campaign_id),
+        campaign_name: String(r.campaign_name),
+        workspace_id: String(r.workspace_id),
+        step: String(r.step),
+        variant: String(r.variant),
+        emails_sent: typeof r.emails_sent === 'number' ? r.emails_sent : null,
+        synced_at: typeof r.synced_at === 'string' ? r.synced_at : null,
+      }));
+      await coalesceCampaignDataDupes(workspaceSlug, db, dedupeInputs);
+    } catch (err) {
+      // Coalesce is best-effort: if it fails, fall through to the upsert so
+      // we don't block the primary write path. Next sync retries.
+      console.error(`[v3-coalesce] ${workspaceSlug}: failed (continuing to upsert):`, err);
+    }
+
     try {
       await db.upsert('campaign_data', campaignDataRows, 'campaign_id,step,variant');
       console.log(`[v3] ${workspaceSlug}: ${campaignDataRows.length} campaign_data rows upserted`);
