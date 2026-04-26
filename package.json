@@ -5,6 +5,10 @@
   "scripts": {
     "sync": "tsx src/runner.ts",
     "sync:sequence-started": "tsx scripts/sync-sequence-started.ts",
+    "sync:infra-sheet-registry": "node --import tsx scripts/sync-infra-sheet-registry.ts",
+    "sync:infra-account-tags": "node --import tsx scripts/sync-infra-account-tags.ts",
+    "build:domain-registry": "node --import tsx scripts/build-domain-registry.ts",
+    "probe:account-tags": "node --import tsx scripts/probe-account-tag-mappings.ts",
     "meetings:preview": "tsx scripts/preview-meetings-matcher.ts",
     "test": "node --import tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit -p tsconfig.node.json"
@@ -13,5 +17,9 @@
     "@types/node": "^20.19.39",
     "tsx": "^4.21.0",
     "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "@types/pg": "^8.20.0",
+    "pg": "^8.20.0"
   }
 }

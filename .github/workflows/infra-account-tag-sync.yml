@@ -1,0 +1,101 @@
+name: Infra Account Tag Sync
+
+# Recurring sync for the domain ownership registry built on top of
+# Instantly account-tag mappings. Runs the long account-tag pull, then
+# rebuilds infra_domain_registry. Pairs with sync-campaign-tags.yml's
+# weekly cadence.
+#
+# Sheet registry (infra_sheet_registry / infra_brand_registry /
+# infra_cancelled_registry) is intentionally NOT in this workflow because
+# the parser depends on a local /tmp/renaissance_sheet dump that isn't
+# present in CI. The sheet registry is refreshed manually by Sam before
+# this cron runs (or out-of-band) and persists in Supabase between runs.
+#
+# Slack notification fires on success AND failure (if: always()) so a hung
+# / killed run is observable from the lock screen.
+
+on:
+  schedule:
+    # Sunday 5:15 UTC — matches campaign-tag-sync.yml. Concurrent runs
+    # against Instantly are acceptable (different endpoints, separate
+    # rate-limit budgets per workspace key).
+    - cron: '15 5 * * 0'
+  workflow_dispatch:
+    inputs:
+      workspace:
+        description: 'Single workspace slug (blank = all in-scope)'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  sync:
+    name: Sync account tags + build domain registry
+    runs-on: ubuntu-latest
+    # Mirrors campaign-tag-sync.yml. Account-tag pull paginates
+    # /custom-tag-mappings (capped at 100/page server-side) — koi-and-destroy
+    # alone has ~72k mappings, renaissance-6 / erc-1 each have 100k+
+    # accounts. 1.5–6h end-to-end is normal.
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Sync account-tag mappings (long; 1.5–6h)
+        id: tags
+        continue-on-error: true
+        run: npm run sync:infra-account-tags
+        env:
+          INSTANTLY_API_KEYS: ${{ secrets.INSTANTLY_API_KEYS }}
+          PIPELINE_SUPABASE_URL: ${{ secrets.PIPELINE_SUPABASE_URL }}
+          PIPELINE_SUPABASE_KEY: ${{ secrets.PIPELINE_SUPABASE_KEY }}
+          WORKSPACE_FILTER: ${{ github.event.inputs.workspace || '' }}
+
+      - name: Build domain registry rollup
+        id: build
+        if: always()
+        continue-on-error: true
+        # Calls public.rebuild_domain_registry() via direct postgres connection.
+        # Server-side rebuild (~2-3 min on 10M mappings). Requires PIPELINE_SUPABASE_DB_URL.
+        run: npm run build:domain-registry
+        env:
+          PIPELINE_SUPABASE_DB_URL: ${{ secrets.PIPELINE_SUPABASE_DB_URL }}
+
+      - name: Notify Slack
+        if: always()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SUPERVISOR_SLACK_WEBHOOK_URL }}
+          TAG_OUTCOME: ${{ steps.tags.outcome }}
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "::warning::SUPERVISOR_SLACK_WEBHOOK_URL not set — skipping Slack notification"
+            exit 0
+          fi
+          if [ "$TAG_OUTCOME" = "success" ] && [ "$BUILD_OUTCOME" = "success" ]; then
+            STATUS=":white_check_mark: SUCCESS"
+          else
+            STATUS=":skull: FAILED"
+          fi
+          PAYLOAD=$(cat <<EOF
+          {
+            "text": "<@U0AM2CQHW9E> *Infra Account Tag Sync*: $STATUS\n• tags: $TAG_OUTCOME\n• build: $BUILD_OUTCOME\n• <$RUN_URL|workflow run>"
+          }
+          EOF
+          )
+          curl -s -X POST -H 'Content-Type: application/json' --data "$PAYLOAD" "$SLACK_WEBHOOK_URL"
+
+      - name: Fail workflow if any sync step failed
+        if: steps.tags.outcome == 'failure' || steps.build.outcome == 'failure'
+        run: exit 1

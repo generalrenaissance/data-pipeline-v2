@@ -183,8 +183,25 @@ export class InstantlyClient {
    * workspaces (koi-and-destroy has ~72k mappings) paginate to hundreds of
    * sequential subrequests — budget accordingly at the caller.
    */
-  async getAllCustomTagMappings(): Promise<TagMapping[]> {
-    return this.getAll<TagMapping>('/custom-tag-mappings');
+  async getAllCustomTagMappings(maxPages?: number): Promise<TagMapping[]> {
+    if (maxPages === undefined) return this.getAll<TagMapping>('/custom-tag-mappings');
+    const results: TagMapping[] = [];
+    let cursor: string | undefined;
+    let pages = 0;
+    do {
+      const p: Record<string, string> = { limit: '100' };
+      if (cursor) p.starting_after = cursor;
+      const raw = await this.get<{ items?: TagMapping[]; next_starting_after?: string } | TagMapping[]>(
+        '/custom-tag-mappings',
+        p,
+      );
+      const items: TagMapping[] = Array.isArray(raw) ? raw : (raw.items ?? []);
+      results.push(...items);
+      cursor = Array.isArray(raw) ? undefined : (raw.next_starting_after ?? undefined);
+      pages++;
+      if (pages >= maxPages) break;
+    } while (cursor);
+    return results;
   }
 
   /**
