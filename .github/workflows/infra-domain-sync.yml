@@ -1,10 +1,18 @@
 name: Infra Domain Sync
 
-# Phase 6 of the domain-infra-sync build (specs/2026-04-24-domain-infra-sync-build-plan.md).
-# workflow_dispatch ONLY for v1. Cron schedules are intentionally omitted; they
-# get added in Phase 10 only after a manual full run is reviewed by Sam.
+# Phase 10 of the domain-infra-sync build (specs/2026-04-24-domain-infra-sync-build-plan.md).
+# workflow_dispatch + weekly cron. Cron added 2026-04-26 after the
+# 2026-04-26 manual `full` run successfully refreshed 8 of 22 workspaces
+# whose infra_accounts were materially stale (outlook-1 was 59x off);
+# dispatch-only cadence proved too rare to keep accuracy.
 
 on:
+  schedule:
+    # Sunday 04:00 UTC — runs 75 min before infra-account-tag-sync.yml at
+    # 5:15 UTC. Full inventory + 7d incremental metrics + aggregate. Deliberately
+    # ahead of the tag sync so the registry rebuild downstream sees fresh
+    # accounts.
+    - cron: '0 4 * * 0'
   workflow_dispatch:
     inputs:
       mode:
@@ -62,11 +70,13 @@ jobs:
       - name: Build CLI args
         id: args
         env:
-          MODE: ${{ github.event.inputs.mode }}
+          # On schedule, github.event.inputs is empty — fall back to safe
+          # defaults: mode=full, days=7, no workspace filter.
+          MODE: ${{ github.event.inputs.mode || 'full' }}
           WORKSPACE: ${{ github.event.inputs.workspace }}
           START_DATE: ${{ github.event.inputs.start_date }}
           END_DATE: ${{ github.event.inputs.end_date }}
-          DAYS: ${{ github.event.inputs.days }}
+          DAYS: ${{ github.event.inputs.days || '7' }}
         run: |
           ARGS="--mode $MODE"
           if [ -n "$WORKSPACE" ]; then
