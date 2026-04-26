@@ -74,6 +74,16 @@ For each raw name, output a decision using this SOP. The `top_candidates` alread
 
 ### 4. Write resolutions
 
+**Chunk the writes.** Compiling all 200 decisions into a single MCP/tool response has triggered the Claude API stream-idle timeout (observed 2026-04-24, again 2026-04-26 06:00 UTC). Process decisions in batches of **20** to keep the stream alive:
+
+1. Sort the decisions list deterministically (by `occurrence_count desc, campaign_name_raw asc` is fine — matches the Step 2 query order).
+2. Slice into chunks of 20.
+3. For each chunk: emit the SQL writes (one MCP call per statement is fine; or batch them in a single multi-statement payload, but do not exceed one chunk per call).
+4. After each chunk, emit a single short heartbeat line in the agent's running output, e.g. `chunk N/M done — wrote X high-conf, Y low-conf/unattributed`. This keeps the model producing tokens between expensive tool calls and prevents stream-idle.
+5. If a chunk fails partway, log which `campaign_name_raw` failed and continue with the next chunk. Do not abort the whole run.
+
+The final summary post (Step 6) runs **after** all chunks complete, using the SQL-derived counts described there — not in-memory tallies from the chunking loop.
+
 For each decision:
 
 **High confidence (`kind='match'` AND `confidence >= 0.85`):**
