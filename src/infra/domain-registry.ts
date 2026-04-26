@@ -1,4 +1,3 @@
-import type { SupabaseClient } from '../supabase';
 import type { ProviderGroup } from './provider-routing';
 
 type MappingStatus =
@@ -267,25 +266,41 @@ export function buildDomainRegistryRows(input: {
   return output.sort((a, b) => a.domain.localeCompare(b.domain));
 }
 
-export async function rebuildDomainRegistry(db: SupabaseClient): Promise<{ rowsWritten: number; statusCounts: Record<string, number> }> {
-  const [accounts, mappings, sheetRows, cancelledRows] = await Promise.all([
-    db.selectAll(
-      'infra_accounts',
-      'select=account_email,domain,workspace_slug,workspace_name,provider_group,account_status,is_free_mail',
-    ) as Promise<InfraAccountRow[]>,
-    db.selectAll(
-      'infra_account_tag_mappings',
-      'select=workspace_slug,account_email,resource_id,domain,tag_id,tag_label',
-    ) as Promise<AccountTagMappingRow[]>,
-    db.selectAll(
-      'infra_sheet_registry',
-      'select=tag,offer,campaign_manager,workspace_name,workspace_slug,sheet_status,brand_name,brand_domain,infra_type,inbox_manager,group_name,pair,email_provider,batch,accounts_expected,expected_daily_cold,accounts_per_domain,expected_domain_count,domain_purchase_date,low_rr,row_confidence',
-    ) as Promise<SheetRow[]>,
-    db.selectAll('infra_cancelled_registry', 'select=tag,row_confidence') as Promise<CancelledRow[]>,
-  ]);
-  const rows = buildDomainRegistryRows({ accounts, mappings, sheetRows, cancelledRows });
-  await db.upsert('infra_domain_registry', rows, 'domain');
-  const statusCounts: Record<string, number> = {};
-  for (const row of rows) statusCounts[row.mapping_status] = (statusCounts[row.mapping_status] ?? 0) + 1;
-  return { rowsWritten: rows.length, statusCounts };
+export async function rebuildDomainRegistry(): Promise<{ rowsWritten: number; statusCounts: Record<string, number> }> {
+  // Server-side rebuild via SQL function. The TypeScript buildDomainRegistryRows()
+  // above remains as the reference implementation for unit tests; the SQL function
+  // public.rebuild_domain_registry() in sql/2026-04-26-rebuild-domain-registry-function.sql
+  // mirrors that logic exactly. Migrating to SQL avoids the PostgREST 8s
+  // statement_timeout that the JS path hit on deep offsets across the 10M-row
+  // infra_account_tag_mappings table.
+  //
+  // Runtime: ~2-3 minutes server-side vs ~2 hours via PostgREST pagination.
+  // The SQL function performs an atomic TRUNCATE+INSERT.
+  const dbUrl = process.env.PIPELINE_SUPABASE_DB_URL;
+  if (!dbUrl) {
+    throw new Error('Missing PIPELINE_SUPABASE_DB_URL — required to call rebuild_domain_registry() via direct postgres connection');
+  }
+  const { Client } = await import('pg');
+  const client = new Client({ connectionString: dbUrl });
+  await client.connect();
+  try {
+    // Disable per-session statement_timeout. Supabase's role-level default (2 min)
+    // is enforced by the server; the rebuild typically takes 2-3 min on 10M
+    // mappings. The Client constructor's statement_timeout option is unreliable
+    // against Supabase — issue the SET as a SQL command.
+    await client.query('set statement_timeout = 0');
+    const result = await client.query<{ mapping_status: string; count: string }>(
+      'select * from public.rebuild_domain_registry()',
+    );
+    const statusCounts: Record<string, number> = {};
+    let rowsWritten = 0;
+    for (const row of result.rows) {
+      const n = Number(row.count);
+      statusCounts[row.mapping_status] = n;
+      rowsWritten += n;
+    }
+    return { rowsWritten, statusCounts };
+  } finally {
+    await client.end();
+  }
 }
