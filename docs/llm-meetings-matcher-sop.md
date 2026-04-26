@@ -182,12 +182,14 @@ FROM public.meetings_booked_raw
 WHERE match_method = 'llm_fuzzy'
   AND synced_at >= $today_start_utc;
 
--- (e) Rollup propagation: campaign_data rows touched after the rollup call
+-- (e) Rollup propagation: campaign_data rows touched after the rollup call.
+--     campaign_data has no `updated_at` column; the rollup write stamps `synced_at`,
+--     which is the correct "rows the rollup just touched" filter.
 SELECT count(*) AS rollup_campaigns_touched
 FROM public.campaign_data
 WHERE step = '__ALL__'
   AND variant = '__ALL__'
-  AND updated_at >= $today_start_utc;
+  AND synced_at >= $today_start_utc;
 ```
 
 `F` (FK failures) is still tracked in-memory during the chunk loop because failed UPDATEs don't leave a SQL trace — increment a counter when an UPDATE returns an FK violation in Step 4.
