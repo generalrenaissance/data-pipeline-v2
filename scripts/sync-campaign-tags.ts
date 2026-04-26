@@ -102,6 +102,8 @@ async function main(): Promise<void> {
 
   const db = new SupabaseClient(PIPELINE_SUPABASE_URL!, PIPELINE_SUPABASE_KEY!);
   let errors = 0;
+  let succeeded = 0;
+  const failedWorkspaces: string[] = [];
   const selectionLabel = workspaceFilter.size > 0
     ? `filter=${[...workspaceFilter].join(',')}`
     : shardCount && shardCount > 1
@@ -114,14 +116,19 @@ async function main(): Promise<void> {
   for (const [workspaceSlug, apiKey] of Object.entries(filtered)) {
     try {
       await syncWorkspaceTagCache(workspaceSlug, apiKey, db);
+      succeeded++;
     } catch (err) {
       errors++;
+      failedWorkspaces.push(workspaceSlug);
       console.error(`[tag-cache] ${workspaceSlug}: ERROR`, err);
     }
   }
 
-  console.log(`[tag-cache] Done with ${errors} errors`);
+  console.log(`[tag-cache] Done: ${succeeded} succeeded, ${errors} failed`);
   if (errors > 0) {
+    console.warn(`[tag-cache] Failed workspaces: ${failedWorkspaces.join(', ')}`);
+  }
+  if (errors > 0 && succeeded === 0) {
     process.exit(1);
   }
 }

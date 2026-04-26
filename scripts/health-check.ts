@@ -8,7 +8,8 @@
  *
  * Two checks:
  *   A. Table freshness — SELECT MAX(synced_at) per table, compare to per-table SLA
- *   B. Workflow failures — gh api for last 3 runs of each monitored workflow
+ *   B. Campaign tag cache freshness — SELECT MAX(refreshed_at) per workspace
+ *   C. Workflow failures — gh api for last 3 runs of each monitored workflow
  *
  * v1 dedup strategy: post every hourly run when unhealthy. Accept repetition
  * in exchange for zero state. Swap for a dedup table if noise becomes a problem.
@@ -42,8 +43,9 @@ const MONITORED_WORKFLOWS = [
   'sequence-started-sync-gh.yml',
   'meetings-booked-sync.yml',
   'conversation-messages-sync.yml',
-  'campaign-tag-sync.yml',
 ];
+
+const CAMPAIGN_TAG_CACHE_MAX_AGE_HOURS = 30;
 
 interface Alert {
   kind: 'stale' | 'failures' | 'empty' | 'error';
@@ -83,6 +85,68 @@ async function checkTableFreshness(
       kind: 'error',
       key: `${sla.table}:error`,
       message: `freshness check for \`${sla.table}\` errored: ${msg}`,
+    };
+  }
+}
+
+async function checkCampaignTagCacheFreshness(db: SupabaseClient): Promise<Alert | null> {
+  try {
+    const rows = (await db.select(
+      'campaign_tag_cache',
+      'select=workspace_id,refreshed_at&limit=5000',
+    )) as Array<{ workspace_id: string; refreshed_at: string | null }>;
+    if (rows.length === 0) {
+      return {
+        kind: 'empty',
+        key: 'campaign_tag_cache:empty',
+        message: '`campaign_tag_cache` is empty - campaign tag consumers have no stored tags',
+      };
+    }
+
+    const maxByWorkspace = new Map<string, string>();
+    for (const row of rows) {
+      if (!row.refreshed_at) continue;
+      const current = maxByWorkspace.get(row.workspace_id);
+      if (!current || row.refreshed_at > current) {
+        maxByWorkspace.set(row.workspace_id, row.refreshed_at);
+      }
+    }
+    if (maxByWorkspace.size === 0) {
+      return {
+        kind: 'empty',
+        key: 'campaign_tag_cache:no-refreshed-at',
+        message: '`campaign_tag_cache` has rows but no `refreshed_at` values',
+      };
+    }
+
+    const stale = [...maxByWorkspace.entries()]
+      .map(([workspace, refreshedAt]) => ({
+        workspace,
+        ageHours: (Date.now() - new Date(refreshedAt).getTime()) / 3_600_000,
+      }))
+      .filter(row => row.ageHours > CAMPAIGN_TAG_CACHE_MAX_AGE_HOURS)
+      .sort((left, right) => right.ageHours - left.ageHours);
+
+    if (stale.length === 0) return null;
+
+    const listed = stale
+      .slice(0, 5)
+      .map(row => `${row.workspace} ${row.ageHours.toFixed(1)}h`)
+      .join(', ');
+    const suffix = stale.length > 5 ? `, +${stale.length - 5} more` : '';
+    return {
+      kind: 'stale',
+      key: 'campaign_tag_cache:stale',
+      message:
+        `\`campaign_tag_cache\` stale for ${stale.length} workspace${stale.length === 1 ? '' : 's'} ` +
+        `(SLA ${CAMPAIGN_TAG_CACHE_MAX_AGE_HOURS}h): ${listed}${suffix}`,
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      kind: 'error',
+      key: 'campaign_tag_cache:error',
+      message: `freshness check for \`campaign_tag_cache\` errored: ${msg}`,
     };
   }
 }
@@ -167,8 +231,9 @@ async function main() {
 
   const db = new SupabaseClient(supabaseUrl, supabaseKey);
 
-  const [freshness, workflows] = await Promise.all([
+  const [freshness, tagCacheFreshness, workflows] = await Promise.all([
     Promise.all(MONITORED_TABLES.map((sla) => checkTableFreshness(db, sla))),
+    checkCampaignTagCacheFreshness(db),
     token && repo
       ? Promise.all(MONITORED_WORKFLOWS.map((wf) => checkWorkflowFailures(repo, token, wf)))
       : Promise.resolve([] as (Alert | null)[]),
@@ -177,10 +242,13 @@ async function main() {
     console.warn('[health] no GITHUB_TOKEN / GITHUB_REPOSITORY — skipping workflow-failure check');
   }
 
-  const alerts = [...freshness, ...workflows].filter((a): a is Alert => a !== null);
+  const alerts = [...freshness, tagCacheFreshness, ...workflows].filter((a): a is Alert => a !== null);
 
   if (alerts.length === 0) {
-    console.log(`[health] ok — ${MONITORED_TABLES.length} tables fresh, ${MONITORED_WORKFLOWS.length} workflows healthy`);
+    console.log(
+      `[health] ok — ${MONITORED_TABLES.length} tables fresh, campaign_tag_cache fresh, ` +
+      `${MONITORED_WORKFLOWS.length} workflows healthy`
+    );
     return;
   }
 
