@@ -135,6 +135,24 @@ test('5 consecutive 429s throws', async () => {
   }
 });
 
+test('custom tag mappings retry transient 502 responses', async () => {
+  let callCount = 0;
+  const stub = installFetchStub(() => {
+    callCount++;
+    if (callCount === 1) return new Response('bad gateway', { status: 502 });
+    return jsonResponse({ items: [{ id: 'mapping-1', tag_id: 'tag-1', resource_id: 'campaign-1', resource_type: 2 }] });
+  });
+  try {
+    const client = new InstantlyClient('test-key');
+    const mappings = await client.getAllCustomTagMappings();
+    assert.equal(mappings.length, 1);
+    assert.equal(client.apiCallCount, 2);
+    assert.equal(stub.calls.length, 2);
+  } finally {
+    stub.restore();
+  }
+});
+
 test('getAccountsRaw with search includes the search query param', async () => {
   const stub = installFetchStub(() =>
     jsonResponse({

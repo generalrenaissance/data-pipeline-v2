@@ -1,6 +1,29 @@
 import type { Campaign, StepAnalytics, CampaignAnalytics, CampaignDailyAnalytics, Account, Tag, TagMapping } from './types';
 import type { AccountDailyMetric } from './infra/types';
 
+const TRANSIENT_STATUS_CODES = new Set([429, 500, 502, 503, 504]);
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function retryDelayMs(attempt: number): number {
+  const base = 500 * Math.pow(2, attempt);
+  const jitter = Math.floor(Math.random() * 250);
+  return base + jitter;
+}
+
+function isTransientFetchError(err: unknown): boolean {
+  if (err instanceof DOMException) {
+    return err.name === 'TimeoutError' || err.name === 'AbortError';
+  }
+  return err instanceof TypeError;
+}
+
+function compactBody(body: string): string {
+  return body.replace(/\s+/g, ' ').trim().slice(0, 500);
+}
+
 export class InstantlyClient {
   private baseUrl = 'https://api.instantly.ai/api/v2';
 
@@ -10,30 +33,7 @@ export class InstantlyClient {
   constructor(private apiKey: string) {}
 
   private async get<T>(path: string, params?: Record<string, string>): Promise<T> {
-    const url = new URL(`${this.baseUrl}${path}`);
-    if (params) {
-      for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
-    }
-    this.apiCallCount++;
-    let res = await fetch(url.toString(), {
-      headers: { Authorization: `Bearer ${this.apiKey}` },
-      signal: AbortSignal.timeout(30_000),
-    });
-    if (res.status === 429) {
-      this.rateLimitEvents++;
-      await new Promise(r => setTimeout(r, 2000));
-      this.apiCallCount++;
-      res = await fetch(url.toString(), {
-        headers: { Authorization: `Bearer ${this.apiKey}` },
-        signal: AbortSignal.timeout(30_000),
-      });
-      if (res.status === 429) this.rateLimitEvents++;
-    }
-    if (!res.ok) {
-      const body = await res.text().catch(() => '');
-      throw new Error(`Instantly ${res.status} on GET ${path}: ${body}`);
-    }
-    return res.json() as Promise<T>;
+    return this.getWithRetry<T>(path, params);
   }
 
   private async getWithRetry<T>(path: string, params?: Record<string, string>): Promise<T> {
@@ -46,29 +46,38 @@ export class InstantlyClient {
     let lastStatus = 0;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       this.apiCallCount++;
-      const res = await fetch(url.toString(), {
-        headers: { Authorization: `Bearer ${this.apiKey}` },
-        signal: AbortSignal.timeout(30_000),
-      });
-      if (res.status === 429) {
-        this.rateLimitEvents++;
-        lastStatus = 429;
+      let res: Response;
+      try {
+        res = await fetch(url.toString(), {
+          headers: { Authorization: `Bearer ${this.apiKey}` },
+          signal: AbortSignal.timeout(30_000),
+        });
+      } catch (err) {
         if (attempt < maxAttempts - 1) {
-          const base = 500 * Math.pow(2, attempt);
-          const jitter = Math.floor(Math.random() * 250);
-          await new Promise(r => setTimeout(r, base + jitter));
+          if (isTransientFetchError(err)) {
+            await sleep(retryDelayMs(attempt));
+            continue;
+          }
+        }
+        throw err;
+      }
+      if (TRANSIENT_STATUS_CODES.has(res.status)) {
+        if (res.status === 429) this.rateLimitEvents++;
+        lastStatus = res.status;
+        lastBody = await res.text().catch(() => '');
+        if (attempt < maxAttempts - 1) {
+          await sleep(retryDelayMs(attempt));
           continue;
         }
-        lastBody = await res.text().catch(() => '');
         break;
       }
       if (!res.ok) {
         const body = await res.text().catch(() => '');
-        throw new Error(`Instantly ${res.status} on GET ${path}: ${body}`);
+        throw new Error(`Instantly ${res.status} on GET ${path}: ${compactBody(body)}`);
       }
       return res.json() as Promise<T>;
     }
-    throw new Error(`Instantly ${lastStatus} on GET ${path} after ${maxAttempts} attempts: ${lastBody}`);
+    throw new Error(`Instantly ${lastStatus} on GET ${path} after ${maxAttempts} attempts: ${compactBody(lastBody)}`);
   }
 
   private async getAll<T>(path: string, params?: Record<string, string>): Promise<T[]> {
