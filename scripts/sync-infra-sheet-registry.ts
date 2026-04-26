@@ -1,4 +1,8 @@
-import { parseSheetDump, syncSheetRegistry } from '../src/infra/sheet-registry';
+import {
+  parseSheetRegistry,
+  selectSheetSource,
+  syncSheetRegistry,
+} from '../src/infra/sheet-registry';
 import { SupabaseClient } from '../src/supabase';
 
 function countBy<T extends string>(values: T[]): Record<T, number> {
@@ -9,11 +13,12 @@ function countBy<T extends string>(values: T[]): Record<T, number> {
 
 async function main(): Promise<void> {
   const dryRun = process.argv.includes('--dry-run');
-  const dumpDir = process.env.SHEET_DUMP_DIR ?? '/tmp/renaissance_sheet';
-  const parsed = await parseSheetDump(dumpDir);
+  const { source, kind, label } = selectSheetSource();
+  console.log(`[sheet-registry] source=${kind} ${label}`);
 
-  console.log(`[sheet-registry] dump_dir=${dumpDir}`);
-  console.log('[sheet-registry] Funding.json row 0 column G: Campaign Manager');
+  const parsed = await parseSheetRegistry(source);
+
+  console.log('[sheet-registry] Funding row 0 column G: Campaign Manager');
   console.log(`[sheet-registry] sheet_rows=${parsed.sheetRows.length}`);
   console.log(`[sheet-registry] brand_rows=${parsed.brandRows.length}`);
   console.log(`[sheet-registry] cancelled_rows=${parsed.cancelledRows.length}`);
