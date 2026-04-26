@@ -74,6 +74,16 @@ For each raw name, output a decision using this SOP. The `top_candidates` alread
 
 ### 4. Write resolutions
 
+**Chunk the writes.** Compiling all 200 decisions into a single MCP/tool response has triggered the Claude API stream-idle timeout (observed 2026-04-24, again 2026-04-26 06:00 UTC). Process decisions in batches of **20** to keep the stream alive:
+
+1. Sort the decisions list deterministically (by `occurrence_count desc, campaign_name_raw asc` is fine — matches the Step 2 query order).
+2. Slice into chunks of 20.
+3. For each chunk: emit the SQL writes (one MCP call per statement is fine; or batch them in a single multi-statement payload, but do not exceed one chunk per call).
+4. After each chunk, emit a single short heartbeat line in the agent's running output, e.g. `chunk N/M done — wrote X high-conf, Y low-conf/unattributed`. This keeps the model producing tokens between expensive tool calls and prevents stream-idle.
+5. If a chunk fails partway, log which `campaign_name_raw` failed and continue with the next chunk. Do not abort the whole run.
+
+The final summary post (Step 6) runs **after** all chunks complete, using the SQL-derived counts described there — not in-memory tallies from the chunking loop.
+
 For each decision:
 
 **High confidence (`kind='match'` AND `confidence >= 0.85`):**
@@ -133,23 +143,70 @@ If any rows were updated in `meetings_booked_raw`, call the rollup RPC via MCP:
 SELECT public.rollup_meetings_booked();
 ```
 
-This propagates the new matches into `campaign_data.meetings_booked`.
+This propagates the new matches into `campaign_data.meetings_booked`. Capture the boolean `did_rollup_run` in your local state so the summary post reflects reality (it lied on the 2026-04-24 first run).
 
-### 6. Post summary to #cc-sam
+### 6. Post summary to #cc-sam — using SQL-derived counts
 
 Channel: `C0AR0EA21C1`.
 
-Message format:
-```
-LLM meetings pass — {date ET}
-- Reviewed: {N} pending rows
-- Resolved high-confidence: {R} (match_method=llm_fuzzy)
-- Left for manual review: {L} (confidence <0.85 or unattributed)
-- FK failures (campaigns table stale): {F}
-- Rollup: {triggered|skipped}
+**Do NOT use in-memory counters.** The 2026-04-24 first run reported `9 llm_fuzzy raw writes` when the actual count in the database was `1`, and reported `Rollup: skipped` when it had run. The summary must be sourced from SQL queries against the database, executed AFTER all chunked writes from Step 4 and the rollup in Step 5 have completed.
+
+Capture `today_start_utc` once at the start of the run as the UTC midnight of the run's calendar date (e.g. `2026-04-26 00:00:00+00`). Use it as the lower bound for "today's" filters below.
+
+Run these SQL queries via the `pipeline-supabase` MCP and use their results in the summary:
+
+```sql
+-- (a) Reviewed count: queue rows touched by this run
+SELECT count(*) AS reviewed
+FROM public.meetings_unmatched_queue
+WHERE last_llm_at >= $today_start_utc;
+
+-- (b) Resolved high-confidence count: queue rows newly closed by this run
+SELECT count(*) AS resolved_high_conf
+FROM public.meetings_unmatched_queue
+WHERE last_llm_at >= $today_start_utc
+  AND review_status = 'resolved'
+  AND llm_decision IS NOT NULL;
+
+-- (c) Left for manual review: queue rows still pending after this pass
+SELECT count(*) AS left_for_review
+FROM public.meetings_unmatched_queue
+WHERE last_llm_at >= $today_start_utc
+  AND review_status = 'pending';
+
+-- (d) Distinct llm_fuzzy raw writes for this run (the number that lied last time)
+SELECT
+  count(*) AS raw_rows_written,
+  count(DISTINCT campaign_name_raw) AS distinct_raw_names
+FROM public.meetings_booked_raw
+WHERE match_method = 'llm_fuzzy'
+  AND synced_at >= $today_start_utc;
+
+-- (e) Rollup propagation: campaign_data rows touched after the rollup call
+SELECT count(*) AS rollup_campaigns_touched
+FROM public.campaign_data
+WHERE step = '__ALL__'
+  AND variant = '__ALL__'
+  AND updated_at >= $today_start_utc;
 ```
 
-If `R + L + F == 0`, post a single-line "nothing to do" update instead.
+`F` (FK failures) is still tracked in-memory during the chunk loop because failed UPDATEs don't leave a SQL trace — increment a counter when an UPDATE returns an FK violation in Step 4.
+
+Message format (use the SQL results above, not loop counters):
+
+```
+LLM meetings pass — {date ET}
+- Reviewed: {a.reviewed} pending rows
+- Resolved high-confidence: {b.resolved_high_conf} (match_method=llm_fuzzy)
+- Raw rows written: {d.raw_rows_written} across {d.distinct_raw_names} distinct names
+- Left for manual review: {c.left_for_review} (confidence <0.85 or unattributed)
+- FK failures (campaigns table stale): {F}
+- Rollup: {triggered, {e.rollup_campaigns_touched} campaigns touched | skipped (no raw writes)}
+```
+
+If `b.resolved_high_conf + c.left_for_review + F == 0`, post a single-line "nothing to do" update instead.
+
+**Self-check before posting:** if `b.resolved_high_conf > 0` and the message says `Rollup: skipped`, that's a bug — abort the post and log an error to stdout. Either the rollup didn't run when it should have, or the SQL conditions don't match.
 
 ---
 
