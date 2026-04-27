@@ -293,9 +293,10 @@ async function pullMetricsForRange(
     const client = deps.makeClient(key);
     try {
       const accountProviders = await loadAccountProviderGroups(deps, slug);
-      const rows = await client.getWorkspaceAccountDailyAnalytics({
+      const rows = await client.getWorkspaceAccountDailyAnalyticsAdaptive({
         startDate: opts.startDate,
         endDate: opts.endDate,
+        logLabel: slug,
       });
       // Defense in depth: client already strips phantom rows; double-check and
       // bump errors if any leak through (per spec section 8E phantom-row rule).

@@ -1,6 +1,7 @@
 import { InstantlyClient } from '../src/instantly';
 import { SupabaseClient } from '../src/supabase';
 import { parseInstantlyKeyMap } from '../src/instantly-key-map';
+import { computeExitCode, envAllowsPartial } from '../src/infra/cli-exit';
 import {
   inventory,
   metricsBackfill,
@@ -20,6 +21,7 @@ import {
  *   --mode metrics-backfill --start YYYY-MM-DD --end YYYY-MM-DD [--workspace <slug>]
  *   --mode full [--workspace <slug>] [--days N]
  *   --mode aggregate-only [--workspace <slug>]
+ *   [--allow-partial] to keep exit 0 when workspace-level errors are recorded
  */
 
 type Mode =
@@ -36,6 +38,7 @@ interface CliArgs {
   start?: string;
   end?: string;
   days?: number;
+  allowPartial?: boolean;
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -63,6 +66,9 @@ function parseArgs(argv: string[]): CliArgs {
       case '--days':
         args.days = parseInt(next ?? '', 10);
         i++;
+        break;
+      case '--allow-partial':
+        args.allowPartial = true;
         break;
       default:
         break;
@@ -275,7 +281,13 @@ async function main(): Promise<void> {
 
   printSummary(args.mode, stats, errored);
 
-  if (errored) process.exit(1);
+  const allowPartial = Boolean(args.allowPartial) || envAllowsPartial(process.env.ALLOW_PARTIAL);
+  const exitCode = computeExitCode({
+    errored,
+    errorCount: stats.errors.length,
+    allowPartial,
+  });
+  if (exitCode !== 0) process.exit(exitCode);
 }
 
 main().catch(err => {
