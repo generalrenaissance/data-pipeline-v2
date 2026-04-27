@@ -18,6 +18,8 @@ export interface SyncDeps {
   runId?: string;
   /** Injected to allow mocking in tests. */
   makeClient: (apiKey: string) => InstantlyClient;
+  /** Injected to allow mocking the aggregate SQL wrapper in tests. */
+  makePgClient?: (connectionString: string) => AggregatePgClient;
   /** Injected for deterministic timestamps in tests; defaults to () => new Date(). */
   now?: () => Date;
 }
@@ -104,6 +106,15 @@ interface ProviderContribution {
   provider_group: ProviderGroup;
   sent: number;
   active_account_count: number;
+}
+
+export interface AggregatePgClient {
+  connect(): Promise<unknown>;
+  query<T extends Record<string, unknown> = Record<string, unknown>>(
+    text: string,
+    values?: unknown[],
+  ): Promise<{ rows: T[] }>;
+  end(): Promise<void>;
 }
 
 function emptyStats(): RunStats {
@@ -504,261 +515,37 @@ function providerContributions(
 export async function rebuildAggregates(
   deps: SyncDeps,
   opts: { workspaceFilter?: string; dateRange?: { startDate: string; endDate: string } } = {},
-): Promise<{ domainsWritten: number }> {
-  // ---------------- Step A: infra_domain_daily_metrics ----------------
-  const dailyParams: string[] = [
-    'select=account_email,metric_date,domain,workspace_slug,provider_group,sent,replies,replies_automatic,api_synced_at',
-  ];
-  if (opts.workspaceFilter) {
-    dailyParams.push(`workspace_slug=eq.${encodeURIComponent(opts.workspaceFilter)}`);
-  }
-  if (opts.dateRange) {
-    dailyParams.push(`metric_date=gte.${opts.dateRange.startDate}`);
-    dailyParams.push(`metric_date=lte.${opts.dateRange.endDate}`);
-  }
-  const dailyRows = (await deps.supabase.selectAll(
-    'infra_account_daily_metrics',
-    dailyParams.join('&'),
-  )) as InfraAccountDailyRow[];
-
-  // Inventory rows for inbox/active/workspace counts and is_free_mail / provider_code_raw.
-  const inventoryParams: string[] = [
-    'select=account_email,domain,workspace_slug,provider_group,provider_code_raw,account_status,is_free_mail',
-  ];
-  if (opts.workspaceFilter) {
-    inventoryParams.push(`workspace_slug=eq.${encodeURIComponent(opts.workspaceFilter)}`);
-  }
-  const inventoryRows = (await deps.supabase.selectAll(
-    'infra_accounts',
-    inventoryParams.join('&'),
-  )) as InfraAccountRow[];
-
-  const inventoryByDomain = new Map<string, InfraAccountRow[]>();
-  for (const row of inventoryRows) {
-    const list = inventoryByDomain.get(row.domain) ?? [];
-    list.push(row);
-    inventoryByDomain.set(row.domain, list);
-  }
-
-  const activeByDomainProvider = new Map<string, Map<ProviderGroup, number>>();
-  for (const [domain, inv] of inventoryByDomain) {
-    activeByDomainProvider.set(domain, activeAccountsByProvider(inv));
-  }
-
-  const rowsByDomain = new Map<string, InfraAccountDailyRow[]>();
-  for (const r of dailyRows) {
-    const list = rowsByDomain.get(r.domain) ?? [];
-    list.push(r);
-    rowsByDomain.set(r.domain, list);
-  }
-  const dominantProviderByDomain = new Map<string, ProviderGroup>();
-  for (const [domain, rows] of rowsByDomain) {
-    dominantProviderByDomain.set(
-      domain,
-      pickDominantProviderGroup(
-        providerContributions(rows, activeByDomainProvider.get(domain) ?? new Map()),
-      ),
+): Promise<{ domainsWritten: number; errors: string[] }> {
+  const dbUrl = process.env.PIPELINE_SUPABASE_DB_URL;
+  if (!dbUrl) {
+    throw new Error(
+      'Missing PIPELINE_SUPABASE_DB_URL — required to call rebuild_infra_aggregates() via direct pg',
     );
   }
 
-  // Group account-daily into (domain, metric_date) buckets. provider_group is
-  // the domain's dominant provider for the rebuild window.
-  type Bucket = {
-    domain: string;
-    metric_date: string;
-    sent: number;
-    replies: number;
-    replies_automatic: number;
-    maxSyncedAt: string;
-  };
-  const buckets = new Map<string, Bucket>();
-  const domainsSeen = new Set<string>();
-  for (const r of dailyRows) {
-    const key = `${r.domain}${r.metric_date}`;
-    let b = buckets.get(key);
-    if (!b) {
-      b = {
-        domain: r.domain,
-        metric_date: r.metric_date,
-        sent: 0,
-        replies: 0,
-        replies_automatic: 0,
-        maxSyncedAt: r.api_synced_at,
-      };
-      buckets.set(key, b);
-    }
-    b.sent += r.sent ?? 0;
-    b.replies += r.replies ?? 0;
-    b.replies_automatic += r.replies_automatic ?? 0;
-    if (r.api_synced_at > b.maxSyncedAt) b.maxSyncedAt = r.api_synced_at;
-    domainsSeen.add(r.domain);
+  let client: AggregatePgClient;
+  if (deps.makePgClient) {
+    client = deps.makePgClient(dbUrl);
+  } else {
+    const { Client } = await import('pg');
+    client = new Client({ connectionString: dbUrl }) as AggregatePgClient;
   }
 
-  // Zero-fill: for each domain seen in data, ensure every
-  // date in [startDate, endDate] has a row (per spec section 8E — absent dates
-  // = zero, not missing).
-  const dateRange = opts.dateRange;
-  if (dateRange) {
-    const allDates = enumerateDates(dateRange.startDate, dateRange.endDate);
-    const nowSynced = nowIso(deps);
-    for (const domain of domainsSeen) {
-      for (const date of allDates) {
-        const key = `${domain}${date}`;
-        if (buckets.has(key)) continue;
-        buckets.set(key, {
-          domain,
-          metric_date: date,
-          sent: 0,
-          replies: 0,
-          replies_automatic: 0,
-          maxSyncedAt: nowSynced,
-        });
-      }
-    }
-  }
-
-  const domainCountsForDay = (domain: string): {
-    inbox: number;
-    active: number;
-    workspaces: number;
-  } => {
-    const inv = inventoryByDomain.get(domain) ?? [];
-    const inbox = inv.length;
-    const active = inv.filter(r => r.account_status === 'active').length;
-    const workspaces = new Set(inv.map(r => r.workspace_slug)).size;
-    return { inbox, active, workspaces };
-  };
-
-  const domainDailyUpsert: Array<Record<string, unknown>> = [];
-  for (const b of buckets.values()) {
-    const counts = domainCountsForDay(b.domain);
-    const rrPct = b.sent > 0 ? (b.replies / b.sent) * 100 : null;
-    domainDailyUpsert.push({
-      domain: b.domain,
-      metric_date: b.metric_date,
-      provider_group: dominantProviderByDomain.get(b.domain) ?? 'unknown',
-      workspace_count: counts.workspaces,
-      inbox_count: counts.inbox,
-      active_inbox_count: counts.active,
-      sent: b.sent,
-      replies: b.replies,
-      replies_automatic: b.replies_automatic,
-      rr_pct: rrPct,
-      api_synced_at: b.maxSyncedAt,
-    });
-  }
-  if (domainDailyUpsert.length > 0) {
-    await deps.supabase.upsert(
-      'infra_domain_daily_metrics',
-      domainDailyUpsert,
-      'domain,metric_date',
+  await client.connect();
+  try {
+    await client.query("set statement_timeout = '15min'");
+    const result = await client.query<{ provider_group: string; domains_written: string }>(
+      'select * from public.rebuild_infra_aggregates($1, $2, $3)',
+      [
+        opts.workspaceFilter ?? null,
+        opts.dateRange?.startDate ?? null,
+        opts.dateRange?.endDate ?? null,
+      ],
     );
+    let domainsWritten = 0;
+    for (const row of result.rows) domainsWritten += Number(row.domains_written);
+    return { domainsWritten, errors: [] };
+  } finally {
+    await client.end();
   }
-
-  // ---------------- Step B: infra_domain_metrics (lifetime) ----------------
-  const affectedDomains = new Set<string>();
-  for (const b of buckets.values()) affectedDomains.add(b.domain);
-
-  if (affectedDomains.size === 0) {
-    return { domainsWritten: 0 };
-  }
-
-  // Pull lifetime account-daily rows for affected domains so the lifetime
-  // dominant provider is based on account-level sent volume.
-  const domainList = [...affectedDomains];
-  const lifetimeRows: InfraAccountDailyRow[] = [];
-  // Chunk the IN() filter to keep URLs sane.
-  const CHUNK = 100;
-  for (let i = 0; i < domainList.length; i += CHUNK) {
-    const chunk = domainList.slice(i, i + CHUNK);
-    const inList = chunk.map(d => `"${d.replace(/"/g, '\\"')}"`).join(',');
-    const part = (await deps.supabase.selectAll(
-      'infra_account_daily_metrics',
-      `select=account_email,metric_date,domain,workspace_slug,provider_group,sent,replies,replies_automatic,api_synced_at&domain=in.(${inList})`,
-    )) as InfraAccountDailyRow[];
-    lifetimeRows.push(...part);
-  }
-
-  const lifetimeByDomain = new Map<string, InfraAccountDailyRow[]>();
-  for (const r of lifetimeRows) {
-    const list = lifetimeByDomain.get(r.domain) ?? [];
-    list.push(r);
-    lifetimeByDomain.set(r.domain, list);
-  }
-
-  const updatedAt = nowIso(deps);
-  const domainMetricsUpsert: Array<Record<string, unknown>> = [];
-  for (const domain of domainList) {
-    const rows = lifetimeByDomain.get(domain) ?? [];
-    let sentTotal = 0;
-    let replyTotal = 0;
-    let autoReplyTotal = 0;
-    let firstDate: string | null = null;
-    let lastDate: string | null = null;
-    let maxSynced: string | null = null;
-    for (const r of rows) {
-      sentTotal += r.sent ?? 0;
-      replyTotal += r.replies ?? 0;
-      autoReplyTotal += r.replies_automatic ?? 0;
-      if (firstDate === null || r.metric_date < firstDate) firstDate = r.metric_date;
-      if (lastDate === null || r.metric_date > lastDate) lastDate = r.metric_date;
-      if (maxSynced === null || r.api_synced_at > maxSynced) maxSynced = r.api_synced_at;
-    }
-
-    const inv = inventoryByDomain.get(domain) ?? [];
-    const inboxCount = inv.length;
-    const activeInboxCount = inv.filter(r => r.account_status === 'active').length;
-    const workspaceCount = new Set(inv.map(r => r.workspace_slug)).size;
-    const isFreeMail = inv.some(r => r.is_free_mail);
-    const dominantRaw = pickDominantProviderCodeRaw(inv, rows);
-    const providerGroupFinal = pickDominantProviderGroup(
-      providerContributions(rows, activeAccountsByProvider(inv)),
-    );
-
-    let coverage: 'full' | 'partial' | 'unknown';
-    if (inv.length === 0) {
-      coverage = 'unknown';
-    } else {
-      const distinctMetricAccounts = new Set(
-        rows.length > 0
-          ? // we only know per-day rollups here; approximate via active inbox count
-            // by checking lifetime sent presence: if any sent at all, treat as
-            // full when counts agree.
-            []
-          : [],
-      );
-      // Use simpler proxy: 'full' when both inventory and metrics rows exist
-      // and lifetime sent > 0; 'partial' if inventory exists but no sends yet.
-      void distinctMetricAccounts;
-      if (rows.length > 0 && sentTotal > 0) coverage = 'full';
-      else coverage = 'partial';
-    }
-
-    const rrPct = sentTotal > 0 ? (replyTotal / sentTotal) * 100 : null;
-
-    domainMetricsUpsert.push({
-      domain,
-      provider_group: providerGroupFinal,
-      dominant_provider_raw: dominantRaw,
-      workspace_count: workspaceCount,
-      inbox_count: inboxCount,
-      active_inbox_count: activeInboxCount,
-      sent_total: sentTotal,
-      reply_count_total: replyTotal,
-      auto_reply_count_total: autoReplyTotal,
-      rr_pct: rrPct,
-      first_metric_date: firstDate,
-      last_metric_date: lastDate,
-      source_coverage_status: coverage,
-      source_max_synced_at: maxSynced,
-      is_free_mail: isFreeMail,
-      updated_at: updatedAt,
-    });
-  }
-
-  if (domainMetricsUpsert.length > 0) {
-    await deps.supabase.upsert('infra_domain_metrics', domainMetricsUpsert, 'domain');
-  }
-
-  return { domainsWritten: domainMetricsUpsert.length };
 }
