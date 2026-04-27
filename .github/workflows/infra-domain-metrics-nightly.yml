@@ -1,0 +1,117 @@
+name: Infra Domain Metrics Nightly
+
+# Daily refresh of Instantly per-account-per-day metrics + per-domain rollup
+# aggregates. Reads recent metrics across all in-scope workspaces and upserts
+# to infra_account_daily_metrics + infra_domain_daily_metrics +
+# infra_domain_metrics. Light compared to the weekly inventory sync.
+#
+# Runs at 02:00 UTC, before infra-sheet-registry-sync.yml at 04:00 UTC and
+# infra-account-tag-sync.yml at 05:15 UTC, so downstream consumers (the hourly
+# domain RR scorer) see fresh metric aggregates by morning.
+#
+# Inventory stays on the weekly Sunday 04:00 UTC schedule in
+# infra-domain-sync.yml. This workflow does not replace that one.
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      days:
+        description: 'Trailing days to refresh (default 7)'
+        required: false
+        default: '7'
+      workspace:
+        description: 'Single workspace slug (leave blank for all in-scope)'
+        required: false
+        default: ''
+
+concurrency:
+  group: infra-domain-metrics-nightly
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Nightly metrics incremental + aggregate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build CLI args
+        id: args
+        env:
+          DAYS: ${{ github.event.inputs.days || '7' }}
+          WORKSPACE: ${{ github.event.inputs.workspace }}
+        run: |
+          ARGS="--mode metrics-incremental --days ${DAYS:-7}"
+          if [ -n "$WORKSPACE" ]; then
+            ARGS="$ARGS --workspace $WORKSPACE"
+          fi
+          echo "args=$ARGS" >> "$GITHUB_OUTPUT"
+          echo "Resolved CLI: npx tsx scripts/sync-infra-domains.ts $ARGS"
+
+      - name: Run metrics-incremental
+        id: sync
+        continue-on-error: true
+        run: npx tsx scripts/sync-infra-domains.ts ${{ steps.args.outputs.args }}
+        env:
+          INSTANTLY_API_KEYS: ${{ secrets.INSTANTLY_API_KEYS }}
+          PIPELINE_SUPABASE_URL: ${{ secrets.PIPELINE_SUPABASE_URL }}
+          PIPELINE_SUPABASE_KEY: ${{ secrets.PIPELINE_SUPABASE_KEY }}
+          PIPELINE_SUPABASE_DB_URL: ${{ secrets.PIPELINE_SUPABASE_DB_URL }}
+
+      - name: Read source freshness
+        id: freshness
+        if: always()
+        continue-on-error: true
+        env:
+          PIPELINE_SUPABASE_DB_URL: ${{ secrets.PIPELINE_SUPABASE_DB_URL }}
+        run: |
+          if [ -z "$PIPELINE_SUPABASE_DB_URL" ]; then
+            echo "freshness=unavailable (PIPELINE_SUPABASE_DB_URL missing)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          FRESHNESS=$(psql "$PIPELINE_SUPABASE_DB_URL" -X -t -A -F '|' -c "
+            select coalesce(max(source_max_synced_at)::text, 'null') || ' (now ' ||
+                   coalesce(round(extract(epoch from (now() - max(source_max_synced_at)))/3600, 1)::text, 'unknown') ||
+                   'h old)'
+            from public.infra_domain_metrics;
+          " | tail -n 1)
+          echo "freshness=$FRESHNESS" >> "$GITHUB_OUTPUT"
+
+      - name: Notify Slack
+        if: always()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SUPERVISOR_SLACK_WEBHOOK_URL }}
+          SYNC_OUTCOME: ${{ steps.sync.outcome }}
+          CLI_ARGS: ${{ steps.args.outputs.args }}
+          SOURCE_FRESHNESS: ${{ steps.freshness.outputs.freshness }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "::warning::SUPERVISOR_SLACK_WEBHOOK_URL not set - skipping Slack notification"
+            exit 0
+          fi
+          if [ "$SYNC_OUTCOME" = "success" ]; then
+            TEXT=":white_check_mark: Nightly metrics-incremental completed\nRun: <$RUN_URL|workflow run>\nMode: $CLI_ARGS\nSource freshness: ${SOURCE_FRESHNESS:-unavailable}"
+          else
+            TEXT=":rotating_light: Nightly metrics-incremental FAILED <@U0AM2CQHW9E>\nRun: <$RUN_URL|workflow run>\nAction: investigate before next 02:00 UTC fire"
+          fi
+          PAYLOAD=$(jq -n --arg text "$TEXT" '{text:$text}')
+          curl -s -X POST -H 'Content-Type: application/json' --data "$PAYLOAD" "$SLACK_WEBHOOK_URL"
+
+      - name: Fail workflow if sync step failed
+        if: steps.sync.outcome == 'failure'
+        run: exit 1
