@@ -19,6 +19,10 @@ export const ELIGIBILITY: Readonly<Record<'google_otd' | 'outlook', number>> = {
   outlook: 1000,
 };
 
+// BOOKMARK: Outlook 0.45% retire threshold validated by Sam 2026-04-26.
+// If Microsoft deliverability behavior shifts, edit this value.
+// The Google/OTD 0.5% number traces to Trajche's manual domain-health
+// sheet (<0.5% = replace, <1% = watch).
 export const THRESHOLDS: Readonly<Record<'google_otd' | 'outlook', { great: number; good: number; warmup: number }>> = {
   // > great = great; [good, great] = good; [warmup, good) = warmup; < warmup = retire
   google_otd: { great: 1.0, good: 0.75, warmup: 0.5 },
