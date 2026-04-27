@@ -1,0 +1,50 @@
+name: Domain RR Score
+
+# Phase 2 of the domain RR automation (specs/2026-04-26-domain-rr-scorer-locate-or-rebuild.md).
+# Hourly cron reads `infra_domain_metrics` and writes `domain_rr_state` +
+# `domain_rr_events`. Source data refreshes weekly (infra-domain-sync.yml,
+# Sunday 04:00 UTC); this scorer recomputes hourly so transitions surface
+# promptly when source data does change. No Slack notifier — the future
+# dashboard is the consumption surface (per Sam's decision: too noisy at
+# hourly cadence). Workflow failures still surface via standard GH Actions
+# email.
+
+on:
+  schedule:
+    - cron: '0 * * * *'  # hourly, top of the hour UTC
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Compute and log distribution but do not write to DB'
+        required: false
+        default: 'false'
+        type: string
+
+jobs:
+  score:
+    name: Score domain RR
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run scorer
+        run: |
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            npx tsx scripts/score-domain-rr.ts --dry-run
+          else
+            npx tsx scripts/score-domain-rr.ts
+          fi
+        env:
+          PIPELINE_SUPABASE_DB_URL: ${{ secrets.PIPELINE_SUPABASE_DB_URL }}
