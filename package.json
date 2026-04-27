@@ -8,6 +8,7 @@
     "sync:infra-sheet-registry": "node --import tsx scripts/sync-infra-sheet-registry.ts",
     "sync:infra-account-tags": "node --import tsx scripts/sync-infra-account-tags.ts",
     "build:domain-registry": "node --import tsx scripts/build-domain-registry.ts",
+    "score:domain-rr": "node --import tsx scripts/score-domain-rr.ts",
     "probe:account-tags": "node --import tsx scripts/probe-account-tag-mappings.ts",
     "meetings:preview": "tsx scripts/preview-meetings-matcher.ts",
     "test": "node --import tsx --test test/*.test.ts",
