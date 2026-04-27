@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   inventory,
   metricsIncremental,
+  pickDominantProviderGroup,
   rebuildAggregates,
   type SyncDeps,
 } from '../src/infra/sync-infra-domains';
@@ -70,7 +71,7 @@ function fixedNow(iso: string): () => Date {
 // Inventory tests
 // ---------------------------------------------------------------------------
 
-test('inventory: upserts to infra_accounts with correct provider_group from slug', async () => {
+test('inventory: upserts to infra_accounts with provider_group from provider_code', async () => {
   const { sb, upserts } = makeFakeSupabase();
   const plansBySlug: Record<string, FakeClientPlan> = {
     'outlook-3': {
@@ -81,7 +82,7 @@ test('inventory: upserts to infra_accounts with correct provider_group from slug
       apiCalls: 2,
     },
     'renaissance-3': {
-      accounts: [{ email: 'c@example.com', provider_code: 3, status: 'paused' }],
+      accounts: [{ email: 'c@example.com', provider_code: 1, status: 'paused' }],
       apiCalls: 1,
     },
   };
@@ -125,6 +126,7 @@ test('inventory: upserts to infra_accounts with correct provider_group from slug
   )!;
   for (const r of renRows.rows as Array<Record<string, unknown>>) {
     assert.equal(r.provider_group, 'google_otd');
+    assert.equal(r.provider_code_raw, 1);
   }
 });
 
@@ -214,8 +216,17 @@ test('inventory: increments apiCalls and rateLimitEvents counters', async () => 
 // metricsIncremental tests
 // ---------------------------------------------------------------------------
 
-test('metricsIncremental: upserts to infra_account_daily_metrics with provider_group from slug not row', async () => {
-  const { sb, upserts } = makeFakeSupabase();
+test('metricsIncremental: upserts to infra_account_daily_metrics with provider_group from inventory', async () => {
+  const { sb, upserts } = makeFakeSupabase({
+    selectAllByTable: {
+      infra_accounts: [
+        {
+          account_email: 'a@tryunsecuredhq.co',
+          provider_group: 'outlook',
+        },
+      ],
+    },
+  });
   const deps: SyncDeps = {
     keyMap: { 'outlook-3': 'k1' },
     supabase: sb,
@@ -249,7 +260,6 @@ test('metricsIncremental: upserts to infra_account_daily_metrics with provider_g
   const dailyUpserts = upserts.filter(c => c.table === 'infra_account_daily_metrics');
   assert.equal(dailyUpserts.length, 1);
   const row = (dailyUpserts[0]!.rows[0] as Record<string, unknown>);
-  // Slug-derived, never row-derived.
   assert.equal(row.provider_group, 'outlook');
   assert.equal(row.workspace_slug, 'outlook-3');
   assert.equal(row.account_email, 'a@tryunsecuredhq.co');
@@ -319,6 +329,36 @@ test('metricsIncremental: skips EXCLUDED_SLUGS', async () => {
 // ---------------------------------------------------------------------------
 // rebuildAggregates tests
 // ---------------------------------------------------------------------------
+
+test('pickDominantProviderGroup: highest sent volume wins over active account count', () => {
+  assert.equal(
+    pickDominantProviderGroup([
+      { provider_group: 'google_otd', sent: 300, active_account_count: 3 },
+      { provider_group: 'outlook', sent: 250, active_account_count: 5 },
+    ]),
+    'google_otd',
+  );
+});
+
+test('pickDominantProviderGroup: equal sent volume uses active-account tiebreaker', () => {
+  assert.equal(
+    pickDominantProviderGroup([
+      { provider_group: 'google_otd', sent: 300, active_account_count: 3 },
+      { provider_group: 'outlook', sent: 300, active_account_count: 5 },
+    ]),
+    'outlook',
+  );
+});
+
+test('pickDominantProviderGroup: equal sent and active count uses lexical tiebreaker', () => {
+  assert.equal(
+    pickDominantProviderGroup([
+      { provider_group: 'outlook', sent: 300, active_account_count: 5 },
+      { provider_group: 'google_otd', sent: 300, active_account_count: 5 },
+    ]),
+    'google_otd',
+  );
+});
 
 function makeAccountDailyRow(args: {
   account_email: string;
@@ -510,6 +550,87 @@ test('rebuildAggregates: rr_pct = (replies/sent)*100 when sent>0, null when sent
   assert.equal(r23.rr_pct, (5 / 200) * 100); // 2.5
   assert.equal(r24.sent, 0);
   assert.equal(r24.rr_pct, null);
+});
+
+test('rebuildAggregates: dominant provider uses sent volume for daily and lifetime rows', async () => {
+  const accountDailyRows: Array<Record<string, unknown>> = [];
+  const inventoryRows: Array<Record<string, unknown>> = [];
+  for (let i = 0; i < 3; i++) {
+    const email = `g${i}@example.com`;
+    accountDailyRows.push(
+      makeAccountDailyRow({
+        account_email: email,
+        metric_date: '2026-04-24',
+        domain: 'example.com',
+        workspace_slug: 'renaissance-3',
+        provider_group: 'google_otd',
+        sent: 100,
+        replies: 1,
+      }),
+    );
+    inventoryRows.push({
+      account_email: email,
+      domain: 'example.com',
+      workspace_slug: 'renaissance-3',
+      provider_group: 'google_otd',
+      provider_code_raw: 1,
+      account_status: 'active',
+      is_free_mail: false,
+    });
+  }
+  for (let i = 0; i < 5; i++) {
+    const email = `m${i}@example.com`;
+    accountDailyRows.push(
+      makeAccountDailyRow({
+        account_email: email,
+        metric_date: '2026-04-24',
+        domain: 'example.com',
+        workspace_slug: 'outlook-3',
+        provider_group: 'outlook',
+        sent: 50,
+        replies: 0,
+      }),
+    );
+    inventoryRows.push({
+      account_email: email,
+      domain: 'example.com',
+      workspace_slug: 'outlook-3',
+      provider_group: 'outlook',
+      provider_code_raw: 3,
+      account_status: 'active',
+      is_free_mail: false,
+    });
+  }
+
+  const { sb, upserts } = makeFakeSupabase({
+    selectAllByTable: {
+      infra_account_daily_metrics: accountDailyRows,
+      infra_accounts: inventoryRows,
+    },
+  });
+  const deps: SyncDeps = {
+    keyMap: {},
+    supabase: sb,
+    makeClient: () => makeFakeClient({}),
+    now: fixedNow('2026-04-25T12:00:00Z'),
+  };
+
+  await rebuildAggregates(deps, {
+    dateRange: { startDate: '2026-04-24', endDate: '2026-04-24' },
+  });
+
+  const dailyUpsert = upserts.find(c => c.table === 'infra_domain_daily_metrics')!;
+  const dailyRows = dailyUpsert.rows as Array<Record<string, unknown>>;
+  assert.equal(dailyRows.length, 1);
+  assert.equal(dailyRows[0]!.provider_group, 'google_otd');
+  assert.equal(dailyRows[0]!.sent, 550);
+
+  const lifetimeUpsert = upserts.find(c => c.table === 'infra_domain_metrics')!;
+  const lifetimeRows = lifetimeUpsert.rows as Array<Record<string, unknown>>;
+  assert.equal(lifetimeRows.length, 1);
+  assert.equal(lifetimeRows[0]!.provider_group, 'google_otd');
+  assert.equal(lifetimeRows[0]!.dominant_provider_raw, 1);
+  assert.equal(lifetimeRows[0]!.sent_total, 550);
 });
 
 test('rebuildAggregates: lifetime aggregate sum matches per-day sum', async () => {

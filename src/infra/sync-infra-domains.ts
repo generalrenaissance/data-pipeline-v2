@@ -7,7 +7,7 @@ import { emailToDomain } from './domain-utils';
 import { isFreeMailDomain } from './free-mail';
 import {
   EXCLUDED_SLUGS,
-  slugToProviderGroup,
+  accountProviderCodeToGroup,
   type ProviderGroup,
 } from './provider-routing';
 
@@ -83,6 +83,11 @@ interface InfraAccountRow {
   is_free_mail: boolean;
 }
 
+interface InfraAccountProviderRow {
+  account_email: string;
+  provider_group: ProviderGroup;
+}
+
 interface InfraAccountDailyRow {
   account_email: string;
   metric_date: string;
@@ -95,14 +100,10 @@ interface InfraAccountDailyRow {
   api_synced_at: string;
 }
 
-interface InfraDomainDailyRow {
-  domain: string;
-  metric_date: string;
+interface ProviderContribution {
   provider_group: ProviderGroup;
   sent: number;
-  replies: number;
-  replies_automatic: number;
-  api_synced_at: string;
+  active_account_count: number;
 }
 
 function emptyStats(): RunStats {
@@ -144,6 +145,35 @@ function pickNum(v: unknown): number | null {
   return null;
 }
 
+export function pickDominantProviderGroup(
+  contributions: ProviderContribution[],
+): ProviderGroup {
+  if (contributions.length === 0) return 'unknown';
+  let best: ProviderContribution | null = null;
+  for (const c of contributions) {
+    if (!best) {
+      best = c;
+      continue;
+    }
+    if (c.sent > best.sent) {
+      best = c;
+      continue;
+    }
+    if (c.sent === best.sent && c.active_account_count > best.active_account_count) {
+      best = c;
+      continue;
+    }
+    if (
+      c.sent === best.sent &&
+      c.active_account_count === best.active_account_count &&
+      c.provider_group < best.provider_group
+    ) {
+      best = c;
+    }
+  }
+  return best?.provider_group ?? 'unknown';
+}
+
 // Instantly v2 returns account.status and account.warmup_status as integers.
 // Spec section 8D references string statuses ('active' / 'paused' /
 // 'connection_error'), so we map at ingest. Unknown ints are preserved
@@ -182,7 +212,7 @@ function buildAccountUpsertRow(
     workspace_slug: slug,
     workspace_name: workspaceName,
     provider_code_raw: pickNum(account.provider_code),
-    provider_group: slugToProviderGroup(slug),
+    provider_group: accountProviderCodeToGroup(pickNum(account.provider_code)),
     account_status: accountStatusFromInt(pickNum(account.status)),
     warmup_status: warmupStatusFromInt(pickNum(account.warmup_status)),
     daily_limit: pickNum((account as Record<string, unknown>).daily_limit),
@@ -251,6 +281,7 @@ async function pullMetricsForRange(
     stats.workspaceCount++;
     const client = deps.makeClient(key);
     try {
+      const accountProviders = await loadAccountProviderGroups(deps, slug);
       const rows = await client.getWorkspaceAccountDailyAnalytics({
         startDate: opts.startDate,
         endDate: opts.endDate,
@@ -273,7 +304,6 @@ async function pullMetricsForRange(
       }
 
       const syncedAt = nowIso(deps);
-      const providerGroup = slugToProviderGroup(slug);
       const upsertRows: InfraAccountDailyUpsertRow[] = [];
       for (const r of filtered) {
         const email = r.email_account.trim().toLowerCase();
@@ -286,9 +316,7 @@ async function pullMetricsForRange(
           metric_date: metricDate,
           domain,
           workspace_slug: slug,
-          // Per spec section 6A: provider_group is derived from the workspace
-          // slug, never from the per-row payload.
-          provider_group: providerGroup,
+          provider_group: accountProviders.get(email) ?? 'unknown',
           sent: r.sent ?? 0,
           bounced: r.bounced ?? 0,
           contacted: r.contacted ?? 0,
@@ -321,6 +349,17 @@ async function pullMetricsForRange(
       stats.rateLimitEvents += client.rateLimitEvents;
     }
   }
+}
+
+async function loadAccountProviderGroups(
+  deps: SyncDeps,
+  workspaceSlug: string,
+): Promise<Map<string, ProviderGroup>> {
+  const rows = (await deps.supabase.selectAll(
+    'infra_accounts',
+    `select=account_email,provider_group&workspace_slug=eq.${encodeURIComponent(workspaceSlug)}`,
+  )) as InfraAccountProviderRow[];
+  return new Map(rows.map(r => [r.account_email.trim().toLowerCase(), r.provider_group]));
 }
 
 function todayIso(deps: SyncDeps): string {
@@ -395,36 +434,71 @@ export async function metricsBackfill(
   return stats;
 }
 
-function pickProviderGroup(values: ProviderGroup[]): ProviderGroup {
-  if (values.length === 0) return 'unknown';
-  const counts = new Map<ProviderGroup, number>();
-  for (const v of values) counts.set(v, (counts.get(v) ?? 0) + 1);
-  let best: ProviderGroup = values[0]!;
-  let bestCount = -1;
-  for (const [g, c] of counts) {
-    if (c > bestCount) {
-      best = g;
-      bestCount = c;
+function pickDominantProviderCodeRaw(
+  inv: InfraAccountRow[],
+  rows: InfraAccountDailyRow[],
+): number | null {
+  const codeByAccount = new Map<string, number>();
+  const activeByCode = new Map<number, number>();
+  for (const account of inv) {
+    if (account.provider_code_raw === null) continue;
+    codeByAccount.set(account.account_email, account.provider_code_raw);
+    if (account.account_status === 'active') {
+      activeByCode.set(
+        account.provider_code_raw,
+        (activeByCode.get(account.provider_code_raw) ?? 0) + 1,
+      );
+    }
+  }
+  const sentByCode = new Map<number, number>();
+  for (const row of rows) {
+    const code = codeByAccount.get(row.account_email);
+    if (code === undefined) continue;
+    sentByCode.set(code, (sentByCode.get(code) ?? 0) + (row.sent ?? 0));
+  }
+  const codes = new Set([...activeByCode.keys(), ...sentByCode.keys()]);
+  let best: number | null = null;
+  let bestSent = -1;
+  let bestActive = -1;
+  for (const code of codes) {
+    const sent = sentByCode.get(code) ?? 0;
+    const active = activeByCode.get(code) ?? 0;
+    if (
+      sent > bestSent ||
+      (sent === bestSent && active > bestActive) ||
+      (sent === bestSent && active === bestActive && (best === null || code < best))
+    ) {
+      best = code;
+      bestSent = sent;
+      bestActive = active;
     }
   }
   return best;
 }
 
-function pickProviderCodeRaw(values: Array<number | null>): number | null {
-  const counts = new Map<number, number>();
-  for (const v of values) {
-    if (v === null) continue;
-    counts.set(v, (counts.get(v) ?? 0) + 1);
+function activeAccountsByProvider(inv: InfraAccountRow[]): Map<ProviderGroup, number> {
+  const counts = new Map<ProviderGroup, number>();
+  for (const row of inv) {
+    if (row.account_status !== 'active') continue;
+    counts.set(row.provider_group, (counts.get(row.provider_group) ?? 0) + 1);
   }
-  let best: number | null = null;
-  let bestCount = -1;
-  for (const [code, c] of counts) {
-    if (c > bestCount) {
-      best = code;
-      bestCount = c;
-    }
+  return counts;
+}
+
+function providerContributions(
+  rows: InfraAccountDailyRow[],
+  activeByProvider: Map<ProviderGroup, number>,
+): ProviderContribution[] {
+  const sentByProvider = new Map<ProviderGroup, number>();
+  for (const row of rows) {
+    sentByProvider.set(row.provider_group, (sentByProvider.get(row.provider_group) ?? 0) + (row.sent ?? 0));
   }
-  return best;
+  const providers = new Set([...sentByProvider.keys(), ...activeByProvider.keys()]);
+  return [...providers].map(provider_group => ({
+    provider_group,
+    sent: sentByProvider.get(provider_group) ?? 0,
+    active_account_count: activeByProvider.get(provider_group) ?? 0,
+  }));
 }
 
 export async function rebuildAggregates(
@@ -466,26 +540,46 @@ export async function rebuildAggregates(
     inventoryByDomain.set(row.domain, list);
   }
 
-  // Group account-daily into (domain, metric_date, provider_group) buckets.
+  const activeByDomainProvider = new Map<string, Map<ProviderGroup, number>>();
+  for (const [domain, inv] of inventoryByDomain) {
+    activeByDomainProvider.set(domain, activeAccountsByProvider(inv));
+  }
+
+  const rowsByDomain = new Map<string, InfraAccountDailyRow[]>();
+  for (const r of dailyRows) {
+    const list = rowsByDomain.get(r.domain) ?? [];
+    list.push(r);
+    rowsByDomain.set(r.domain, list);
+  }
+  const dominantProviderByDomain = new Map<string, ProviderGroup>();
+  for (const [domain, rows] of rowsByDomain) {
+    dominantProviderByDomain.set(
+      domain,
+      pickDominantProviderGroup(
+        providerContributions(rows, activeByDomainProvider.get(domain) ?? new Map()),
+      ),
+    );
+  }
+
+  // Group account-daily into (domain, metric_date) buckets. provider_group is
+  // the domain's dominant provider for the rebuild window.
   type Bucket = {
     domain: string;
     metric_date: string;
-    provider_group: ProviderGroup;
     sent: number;
     replies: number;
     replies_automatic: number;
     maxSyncedAt: string;
   };
   const buckets = new Map<string, Bucket>();
-  const domainsByProvider = new Map<string, Set<ProviderGroup>>();
+  const domainsSeen = new Set<string>();
   for (const r of dailyRows) {
-    const key = `${r.domain}${r.metric_date}${r.provider_group}`;
+    const key = `${r.domain}${r.metric_date}`;
     let b = buckets.get(key);
     if (!b) {
       b = {
         domain: r.domain,
         metric_date: r.metric_date,
-        provider_group: r.provider_group,
         sent: 0,
         replies: 0,
         replies_automatic: 0,
@@ -497,33 +591,28 @@ export async function rebuildAggregates(
     b.replies += r.replies ?? 0;
     b.replies_automatic += r.replies_automatic ?? 0;
     if (r.api_synced_at > b.maxSyncedAt) b.maxSyncedAt = r.api_synced_at;
-    const set = domainsByProvider.get(r.domain) ?? new Set<ProviderGroup>();
-    set.add(r.provider_group);
-    domainsByProvider.set(r.domain, set);
+    domainsSeen.add(r.domain);
   }
 
-  // Zero-fill: for each (domain, provider_group) seen in data, ensure every
+  // Zero-fill: for each domain seen in data, ensure every
   // date in [startDate, endDate] has a row (per spec section 8E — absent dates
   // = zero, not missing).
   const dateRange = opts.dateRange;
   if (dateRange) {
     const allDates = enumerateDates(dateRange.startDate, dateRange.endDate);
     const nowSynced = nowIso(deps);
-    for (const [domain, providerSet] of domainsByProvider) {
-      for (const pg of providerSet) {
-        for (const date of allDates) {
-          const key = `${domain}${date}${pg}`;
-          if (buckets.has(key)) continue;
-          buckets.set(key, {
-            domain,
-            metric_date: date,
-            provider_group: pg,
-            sent: 0,
-            replies: 0,
-            replies_automatic: 0,
-            maxSyncedAt: nowSynced,
-          });
-        }
+    for (const domain of domainsSeen) {
+      for (const date of allDates) {
+        const key = `${domain}${date}`;
+        if (buckets.has(key)) continue;
+        buckets.set(key, {
+          domain,
+          metric_date: date,
+          sent: 0,
+          replies: 0,
+          replies_automatic: 0,
+          maxSyncedAt: nowSynced,
+        });
       }
     }
   }
@@ -547,7 +636,7 @@ export async function rebuildAggregates(
     domainDailyUpsert.push({
       domain: b.domain,
       metric_date: b.metric_date,
-      provider_group: b.provider_group,
+      provider_group: dominantProviderByDomain.get(b.domain) ?? 'unknown',
       workspace_count: counts.workspaces,
       inbox_count: counts.inbox,
       active_inbox_count: counts.active,
@@ -574,22 +663,23 @@ export async function rebuildAggregates(
     return { domainsWritten: 0 };
   }
 
-  // Pull lifetime domain-daily rows for affected domains.
+  // Pull lifetime account-daily rows for affected domains so the lifetime
+  // dominant provider is based on account-level sent volume.
   const domainList = [...affectedDomains];
-  const lifetimeRows: InfraDomainDailyRow[] = [];
+  const lifetimeRows: InfraAccountDailyRow[] = [];
   // Chunk the IN() filter to keep URLs sane.
   const CHUNK = 100;
   for (let i = 0; i < domainList.length; i += CHUNK) {
     const chunk = domainList.slice(i, i + CHUNK);
     const inList = chunk.map(d => `"${d.replace(/"/g, '\\"')}"`).join(',');
     const part = (await deps.supabase.selectAll(
-      'infra_domain_daily_metrics',
-      `select=domain,metric_date,provider_group,sent,replies,replies_automatic,api_synced_at&domain=in.(${inList})`,
-    )) as InfraDomainDailyRow[];
+      'infra_account_daily_metrics',
+      `select=account_email,metric_date,domain,workspace_slug,provider_group,sent,replies,replies_automatic,api_synced_at&domain=in.(${inList})`,
+    )) as InfraAccountDailyRow[];
     lifetimeRows.push(...part);
   }
 
-  const lifetimeByDomain = new Map<string, InfraDomainDailyRow[]>();
+  const lifetimeByDomain = new Map<string, InfraAccountDailyRow[]>();
   for (const r of lifetimeRows) {
     const list = lifetimeByDomain.get(r.domain) ?? [];
     list.push(r);
@@ -606,7 +696,6 @@ export async function rebuildAggregates(
     let firstDate: string | null = null;
     let lastDate: string | null = null;
     let maxSynced: string | null = null;
-    const providerGroups: ProviderGroup[] = [];
     for (const r of rows) {
       sentTotal += r.sent ?? 0;
       replyTotal += r.replies ?? 0;
@@ -614,7 +703,6 @@ export async function rebuildAggregates(
       if (firstDate === null || r.metric_date < firstDate) firstDate = r.metric_date;
       if (lastDate === null || r.metric_date > lastDate) lastDate = r.metric_date;
       if (maxSynced === null || r.api_synced_at > maxSynced) maxSynced = r.api_synced_at;
-      providerGroups.push(r.provider_group);
     }
 
     const inv = inventoryByDomain.get(domain) ?? [];
@@ -622,12 +710,10 @@ export async function rebuildAggregates(
     const activeInboxCount = inv.filter(r => r.account_status === 'active').length;
     const workspaceCount = new Set(inv.map(r => r.workspace_slug)).size;
     const isFreeMail = inv.some(r => r.is_free_mail);
-    const dominantRaw = pickProviderCodeRaw(inv.map(r => r.provider_code_raw));
-
-    const providerGroupFinal =
-      inv.length > 0
-        ? pickProviderGroup(inv.map(r => r.provider_group))
-        : pickProviderGroup(providerGroups);
+    const dominantRaw = pickDominantProviderCodeRaw(inv, rows);
+    const providerGroupFinal = pickDominantProviderGroup(
+      providerContributions(rows, activeAccountsByProvider(inv)),
+    );
 
     let coverage: 'full' | 'partial' | 'unknown';
     if (inv.length === 0) {
