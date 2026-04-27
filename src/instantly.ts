@@ -2,6 +2,7 @@ import type { Campaign, StepAnalytics, CampaignAnalytics, CampaignDailyAnalytics
 import type { AccountDailyMetric } from './infra/types';
 
 const TRANSIENT_STATUS_CODES = new Set([429, 500, 502, 503, 504]);
+const SPLITTABLE_STATUS_CODES = new Set([500, 502, 503, 504]);
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -18,6 +19,59 @@ function isTransientFetchError(err: unknown): boolean {
     return err.name === 'TimeoutError' || err.name === 'AbortError';
   }
   return err instanceof TypeError;
+}
+
+function instantlyStatusFromError(err: unknown): number | null {
+  if (!(err instanceof Error)) return null;
+  const match = err.message.match(/^Instantly (\d{3}) on GET /);
+  if (!match) return null;
+  const status = Number(match[1]);
+  return Number.isFinite(status) ? status : null;
+}
+
+function isSplittableAccountAnalyticsError(err: unknown): boolean {
+  const status = instantlyStatusFromError(err);
+  if (status !== null) return SPLITTABLE_STATUS_CODES.has(status);
+  return isTransientFetchError(err);
+}
+
+function shiftDateIso(dateIso: string, deltaDays: number): string {
+  const [y, m, d] = dateIso.split('-').map(n => parseInt(n, 10));
+  const dt = new Date(Date.UTC(y!, (m! - 1), d!));
+  dt.setUTCDate(dt.getUTCDate() + deltaDays);
+  return dt.toISOString().slice(0, 10);
+}
+
+function daysInclusive(startDate: string, endDate: string): number {
+  const start = Date.parse(`${startDate}T00:00:00.000Z`);
+  const end = Date.parse(`${endDate}T00:00:00.000Z`);
+  return Math.floor((end - start) / 86_400_000) + 1;
+}
+
+function splitDateRange(startDate: string, endDate: string): {
+  left: { startDate: string; endDate: string };
+  right: { startDate: string; endDate: string };
+} {
+  const days = daysInclusive(startDate, endDate);
+  const leftDays = Math.floor(days / 2);
+  const leftEnd = shiftDateIso(startDate, leftDays - 1);
+  const rightStart = shiftDateIso(leftEnd, 1);
+  return {
+    left: { startDate, endDate: leftEnd },
+    right: { startDate: rightStart, endDate },
+  };
+}
+
+function dedupeAccountDailyMetrics(rows: AccountDailyMetric[]): AccountDailyMetric[] {
+  const seen = new Set<string>();
+  const out: AccountDailyMetric[] = [];
+  for (const row of rows) {
+    const key = `${String(row.email_account ?? '').trim().toLowerCase()}\u0000${String(row.date ?? '').trim()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(row);
+  }
+  return out;
 }
 
 function compactBody(body: string): string {
@@ -272,5 +326,40 @@ export class InstantlyClient {
         clicks: r.clicks ?? 0,
         unique_clicks: r.unique_clicks ?? 0,
       }));
+  }
+
+  async getWorkspaceAccountDailyAnalyticsAdaptive(params: {
+    startDate: string;
+    endDate: string;
+    logLabel?: string;
+  }): Promise<AccountDailyMetric[]> {
+    const fetchRange = async (
+      startDate: string,
+      endDate: string,
+    ): Promise<AccountDailyMetric[]> => {
+      try {
+        return await this.getWorkspaceAccountDailyAnalytics({ startDate, endDate });
+      } catch (err) {
+        if (startDate === endDate || !isSplittableAccountAnalyticsError(err)) throw err;
+        const label = params.logLabel ? `${params.logLabel}: ` : '';
+        const status = instantlyStatusFromError(err);
+        const reason = status !== null ? String(status) : err instanceof Error ? err.name : 'fetch error';
+        console.log(
+          `[metrics] ${label}window ${startDate}..${endDate} failed with ${reason}, splitting`,
+        );
+        const { left, right } = splitDateRange(startDate, endDate);
+        const leftRows = await fetchRange(left.startDate, left.endDate);
+        console.log(
+          `[metrics] ${label}fetched ${left.startDate}..${left.endDate} rows=${leftRows.length}`,
+        );
+        const rightRows = await fetchRange(right.startDate, right.endDate);
+        console.log(
+          `[metrics] ${label}fetched ${right.startDate}..${right.endDate} rows=${rightRows.length}`,
+        );
+        return dedupeAccountDailyMetrics([...leftRows, ...rightRows]);
+      }
+    };
+
+    return fetchRange(params.startDate, params.endDate);
   }
 }

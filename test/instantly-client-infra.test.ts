@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { InstantlyClient } from '../src/instantly';
+import type { AccountDailyMetric } from '../src/infra/types';
 
 type FetchCall = { url: string; init?: RequestInit };
 
@@ -26,6 +27,43 @@ function jsonResponse(body: unknown, status = 200): Response {
     status,
     headers: { 'content-type': 'application/json' },
   });
+}
+
+function metric(email: string, date: string, sent: number): AccountDailyMetric {
+  return {
+    date,
+    email_account: email,
+    sent,
+    bounced: 0,
+    contacted: sent,
+    new_leads_contacted: sent,
+    opened: 0,
+    unique_opened: 0,
+    replies: 0,
+    unique_replies: 0,
+    replies_automatic: 0,
+    unique_replies_automatic: 0,
+    clicks: 0,
+    unique_clicks: 0,
+  };
+}
+
+class PlannedAnalyticsClient extends InstantlyClient {
+  requests: Array<{ startDate: string; endDate: string }> = [];
+
+  constructor(private plan: Record<string, AccountDailyMetric[] | Error>) {
+    super('test-key');
+  }
+
+  override async getWorkspaceAccountDailyAnalytics(params: {
+    startDate: string;
+    endDate: string;
+  }): Promise<AccountDailyMetric[]> {
+    this.requests.push(params);
+    const result = this.plan[`${params.startDate}..${params.endDate}`];
+    if (result instanceof Error) throw result;
+    return result ?? [];
+  }
 }
 
 test('getWorkspaceAccountDailyAnalytics filters out the phantom empty-email row', async () => {
@@ -91,6 +129,90 @@ test('getWorkspaceAccountDailyAnalytics increments apiCallCount once per call', 
   } finally {
     stub.restore();
   }
+});
+
+test('getWorkspaceAccountDailyAnalyticsAdaptive splits 500 windows and dedupes combined rows', async () => {
+  const client = new PlannedAnalyticsClient({
+    '2026-04-20..2026-04-27': new Error(
+      'Instantly 500 on GET /accounts/analytics/daily after 5 attempts: upstream error',
+    ),
+    '2026-04-20..2026-04-23': [
+      metric('a@example.com', '2026-04-20', 3),
+      metric('a@example.com', '2026-04-20', 3),
+    ],
+    '2026-04-24..2026-04-27': [metric('b@example.com', '2026-04-24', 4)],
+  });
+
+  const rows = await client.getWorkspaceAccountDailyAnalyticsAdaptive({
+    startDate: '2026-04-20',
+    endDate: '2026-04-27',
+  });
+
+  assert.deepEqual(client.requests, [
+    { startDate: '2026-04-20', endDate: '2026-04-27' },
+    { startDate: '2026-04-20', endDate: '2026-04-23' },
+    { startDate: '2026-04-24', endDate: '2026-04-27' },
+  ]);
+  assert.deepEqual(
+    rows.map(r => `${r.email_account}|${r.date}|${r.sent}`),
+    ['a@example.com|2026-04-20|3', 'b@example.com|2026-04-24|4'],
+  );
+});
+
+test('getWorkspaceAccountDailyAnalyticsAdaptive does not split successful full windows', async () => {
+  const client = new PlannedAnalyticsClient({
+    '2026-04-20..2026-04-27': [metric('a@example.com', '2026-04-20', 3)],
+  });
+
+  const rows = await client.getWorkspaceAccountDailyAnalyticsAdaptive({
+    startDate: '2026-04-20',
+    endDate: '2026-04-27',
+  });
+
+  assert.equal(rows.length, 1);
+  assert.deepEqual(client.requests, [
+    { startDate: '2026-04-20', endDate: '2026-04-27' },
+  ]);
+});
+
+test('getWorkspaceAccountDailyAnalyticsAdaptive bubbles single-day 500', async () => {
+  const client = new PlannedAnalyticsClient({
+    '2026-04-27..2026-04-27': new Error(
+      'Instantly 500 on GET /accounts/analytics/daily after 5 attempts: upstream error',
+    ),
+  });
+
+  await assert.rejects(
+    () =>
+      client.getWorkspaceAccountDailyAnalyticsAdaptive({
+        startDate: '2026-04-27',
+        endDate: '2026-04-27',
+      }),
+    /Instantly 500/,
+  );
+  assert.deepEqual(client.requests, [
+    { startDate: '2026-04-27', endDate: '2026-04-27' },
+  ]);
+});
+
+test('getWorkspaceAccountDailyAnalyticsAdaptive preserves 429 behavior', async () => {
+  const client = new PlannedAnalyticsClient({
+    '2026-04-20..2026-04-27': new Error(
+      'Instantly 429 on GET /accounts/analytics/daily after 5 attempts: rate limited',
+    ),
+  });
+
+  await assert.rejects(
+    () =>
+      client.getWorkspaceAccountDailyAnalyticsAdaptive({
+        startDate: '2026-04-20',
+        endDate: '2026-04-27',
+      }),
+    /Instantly 429/,
+  );
+  assert.deepEqual(client.requests, [
+    { startDate: '2026-04-20', endDate: '2026-04-27' },
+  ]);
 });
 
 test('429 response increments rateLimitEvents and triggers retry', async () => {

@@ -110,6 +110,7 @@ function makeFakeClient(plan: FakeClientPlan): InstantlyClient {
     rateLimitEvents: plan.rateLimitEvents ?? 0,
     getAccountsRaw: async () => plan.accounts ?? [],
     getWorkspaceAccountDailyAnalytics: async () => plan.daily ?? [],
+    getWorkspaceAccountDailyAnalyticsAdaptive: async () => plan.daily ?? [],
   };
   return stub as InstantlyClient;
 }
