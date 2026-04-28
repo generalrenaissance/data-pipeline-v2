@@ -288,11 +288,16 @@ async function pullMetricsForRange(
 ): Promise<void> {
   const workspaces = inScopeWorkspaces(deps.keyMap, opts.workspaceFilter);
 
+  // Load account → provider_group map ONCE for the whole sync. The map
+  // is global (no workspace filter) so cross-workspace daily metrics
+  // resolve to the correct provider attribution regardless of which
+  // workspace's API call returned them.
+  const accountProviders = await loadAccountProviderGroups(deps);
+
   for (const [slug, key] of workspaces) {
     stats.workspaceCount++;
     const client = deps.makeClient(key);
     try {
-      const accountProviders = await loadAccountProviderGroups(deps, slug);
       const rows = await client.getWorkspaceAccountDailyAnalyticsAdaptive({
         startDate: opts.startDate,
         endDate: opts.endDate,
@@ -365,11 +370,19 @@ async function pullMetricsForRange(
 
 async function loadAccountProviderGroups(
   deps: SyncDeps,
-  workspaceSlug: string,
 ): Promise<Map<string, ProviderGroup>> {
+  // Load globally by account_email — no workspace filter. Instantly's
+  // daily-metrics endpoint returns activity for accounts under
+  // workspaces other than their inventory home (e.g. a renaissance-1
+  // account showing up in section-125-2's daily metrics). Filtering
+  // by workspace_slug here misses those accounts and falls back to
+  // 'unknown', which silently corrupted ~1,373 rows in the
+  // 2026-04-27 all-workspace nightly. account_email is unique across
+  // workspaces (PK on infra_accounts), so the global lookup is correct
+  // and unambiguous.
   const rows = (await deps.supabase.selectAll(
     'infra_accounts',
-    `select=account_email,provider_group&workspace_slug=eq.${encodeURIComponent(workspaceSlug)}`,
+    `select=account_email,provider_group`,
   )) as InfraAccountProviderRow[];
   return new Map(rows.map(r => [r.account_email.trim().toLowerCase(), r.provider_group]));
 }

@@ -322,6 +322,70 @@ test('metricsIncremental: upserts to infra_account_daily_metrics with provider_g
   assert.equal(row.replies, 1);
 });
 
+test('metricsIncremental: provider_group resolves cross-workspace via global infra_accounts lookup', async () => {
+  // Regression test for the 2026-04-27 Step 2 follow-up bug: Instantly's
+  // daily-metrics endpoint returns activity for accounts whose inventory
+  // home is a *different* workspace than the API call. The writer must
+  // still resolve provider_group correctly via the account's infra_accounts
+  // row, not fall back to 'unknown'.
+  //
+  // Scenario: account 'a@tryclearyield.co' lives in renaissance-1 with
+  // provider_group='google_otd'. Daily metrics endpoint called with
+  // section-125-2's API key returns activity for that account. Expected:
+  // upsert row has provider_group='google_otd' (from the global lookup),
+  // not 'unknown' (which would happen with a workspace_slug-filtered lookup).
+  const { sb, upserts } = makeFakeSupabase({
+    selectAllByTable: {
+      infra_accounts: [
+        {
+          account_email: 'a@tryclearyield.co',
+          provider_group: 'google_otd',
+          // workspace_slug field intentionally omitted to mirror the
+          // filter-free SELECT shape used by loadAccountProviderGroups.
+        },
+      ],
+    },
+  });
+  const deps: SyncDeps = {
+    keyMap: { 'section-125-2': 'k_s125' },
+    supabase: sb,
+    makeClient: () =>
+      makeFakeClient({
+        daily: [
+          {
+            date: '2026-04-23',
+            email_account: 'a@tryclearyield.co',
+            sent: 5,
+            bounced: 0,
+            contacted: 5,
+            new_leads_contacted: 5,
+            opened: 0,
+            unique_opened: 0,
+            replies: 0,
+            unique_replies: 0,
+            replies_automatic: 0,
+            unique_replies_automatic: 0,
+            clicks: 0,
+            unique_clicks: 0,
+          },
+        ],
+        apiCalls: 1,
+      }),
+    makePgClient: makeAggregateClientFactory().makePgClient,
+    now: fixedNow('2026-04-24T12:00:00Z'),
+  };
+
+  const stats = await metricsIncremental(deps, { days: 7 });
+  assert.equal(stats.accountMetricRows, 1);
+  const dailyUpserts = upserts.filter(c => c.table === 'infra_account_daily_metrics');
+  assert.equal(dailyUpserts.length, 1);
+  const row = dailyUpserts[0]!.rows[0] as Record<string, unknown>;
+  // Critical: provider_group is the account's correct attribution, NOT 'unknown'
+  assert.equal(row.provider_group, 'google_otd');
+  // workspace_slug reflects the API call's workspace, which differs from inventory home
+  assert.equal(row.workspace_slug, 'section-125-2');
+});
+
 test('metricsIncremental: bumps errors when phantom empty-email row leaks past client filter', async () => {
   const { sb } = makeFakeSupabase();
   const deps: SyncDeps = {
