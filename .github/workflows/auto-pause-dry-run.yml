@@ -46,8 +46,10 @@ jobs:
           echo "report=deliverables/auto-pause/$(date -u +%F)-would-pause-summary.md" >> "$GITHUB_OUTPUT"
           echo "accounts_csv=deliverables/auto-pause/$(date -u +%F)-would-pause-accounts.csv" >> "$GITHUB_OUTPUT"
           echo "freshness_gate=$(grep 'freshness_gate=' auto-pause-dry-run.log | tail -n 1 | cut -d= -f2)" >> "$GITHUB_OUTPUT"
-          echo "would_pause_domains=$(grep 'would_pause_domains=' auto-pause-dry-run.log | tail -n 1 | cut -d= -f2)" >> "$GITHUB_OUTPUT"
-          echo "would_pause_accounts=$(grep 'would_pause_accounts=' auto-pause-dry-run.log | tail -n 1 | cut -d= -f2)" >> "$GITHUB_OUTPUT"
+          echo "would_pause_now_domains=$(grep 'would_pause_now_domains=' auto-pause-dry-run.log | tail -n 1 | cut -d= -f2)" >> "$GITHUB_OUTPUT"
+          echo "would_pause_now_accounts=$(grep 'would_pause_now_accounts=' auto-pause-dry-run.log | tail -n 1 | cut -d= -f2)" >> "$GITHUB_OUTPUT"
+          echo "cooldown_skipped_domains=$(grep 'cooldown_skipped_domains=' auto-pause-dry-run.log | tail -n 1 | cut -d= -f2)" >> "$GITHUB_OUTPUT"
+          echo "cooldown_skipped_accounts=$(grep 'cooldown_skipped_accounts=' auto-pause-dry-run.log | tail -n 1 | cut -d= -f2)" >> "$GITHUB_OUTPUT"
           echo "estimated_cold_per_day_saved=$(grep 'estimated_cold_per_day_saved=' auto-pause-dry-run.log | tail -n 1 | cut -d= -f2)" >> "$GITHUB_OUTPUT"
 
       - name: Upload dry-run artifacts
@@ -65,8 +67,10 @@ jobs:
           SLACK_WEBHOOK_URL: ${{ secrets.SUPERVISOR_SLACK_WEBHOOK_URL }}
           JOB_STATUS: ${{ job.status }}
           FRESHNESS_GATE: ${{ steps.dry_run.outputs.freshness_gate }}
-          WOULD_PAUSE_ACCOUNTS: ${{ steps.dry_run.outputs.would_pause_accounts }}
-          WOULD_PAUSE_DOMAINS: ${{ steps.dry_run.outputs.would_pause_domains }}
+          WOULD_PAUSE_NOW_ACCOUNTS: ${{ steps.dry_run.outputs.would_pause_now_accounts }}
+          WOULD_PAUSE_NOW_DOMAINS: ${{ steps.dry_run.outputs.would_pause_now_domains }}
+          COOLDOWN_SKIPPED_ACCOUNTS: ${{ steps.dry_run.outputs.cooldown_skipped_accounts }}
+          COOLDOWN_SKIPPED_DOMAINS: ${{ steps.dry_run.outputs.cooldown_skipped_domains }}
           EST_COLD_PER_DAY: ${{ steps.dry_run.outputs.estimated_cold_per_day_saved }}
           REPORT_PATH: ${{ steps.dry_run.outputs.report }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -79,9 +83,9 @@ jobs:
           if [ "$JOB_STATUS" != "success" ]; then
             TEXT=":rotating_light: Auto-pause dry-run FAILED <@U0AM2CQHW9E>\nRun: <$RUN_URL|workflow run>\nAction: investigate before any pause automation work"
           elif [ "$FRESHNESS_GATE" != "PASS" ]; then
-            TEXT=":rotating_light: Auto-pause dry-run $(date -u +%F) <@U0AM2CQHW9E>\nWould pause: ${WOULD_PAUSE_ACCOUNTS:-0} accounts across ${WOULD_PAUSE_DOMAINS:-0} domains (~${EST_COLD_PER_DAY:-0} cold/day saved)\nFreshness gate: ${FRESHNESS_GATE:-UNKNOWN}\nReport: $REPORT_PATH\nRun: <$RUN_URL|workflow run>"
+            TEXT=":rotating_light: Auto-pause dry-run $(date -u +%F) <@U0AM2CQHW9E>\nWould pause NOW: ${WOULD_PAUSE_NOW_ACCOUNTS:-0} accounts across ${WOULD_PAUSE_NOW_DOMAINS:-0} domains (~${EST_COLD_PER_DAY:-0} cold/day saved)\nCooldown-skipped: ${COOLDOWN_SKIPPED_ACCOUNTS:-0} accounts across ${COOLDOWN_SKIPPED_DOMAINS:-0} domains\nFreshness gate: ${FRESHNESS_GATE:-UNKNOWN}\nReport: $REPORT_PATH\nRun: <$RUN_URL|workflow run>"
           else
-            TEXT=":mag: Auto-pause dry-run $(date -u +%F)\nWould pause: ${WOULD_PAUSE_ACCOUNTS:-0} accounts across ${WOULD_PAUSE_DOMAINS:-0} domains (~${EST_COLD_PER_DAY:-0} cold/day saved)\nFreshness gate: ${FRESHNESS_GATE:-UNKNOWN}\nReport: $REPORT_PATH\nRun: <$RUN_URL|workflow run>"
+            TEXT=":mag: Auto-pause dry-run $(date -u +%F)\nWould pause NOW: ${WOULD_PAUSE_NOW_ACCOUNTS:-0} accounts across ${WOULD_PAUSE_NOW_DOMAINS:-0} domains (~${EST_COLD_PER_DAY:-0} cold/day saved)\nCooldown-skipped: ${COOLDOWN_SKIPPED_ACCOUNTS:-0} accounts across ${COOLDOWN_SKIPPED_DOMAINS:-0} domains\nFreshness gate: ${FRESHNESS_GATE:-UNKNOWN}\nReport: $REPORT_PATH\nRun: <$RUN_URL|workflow run>"
           fi
 
           PAYLOAD=$(jq -n --arg text "$TEXT" '{text:$text}')
