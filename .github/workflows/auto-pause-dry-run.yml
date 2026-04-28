@@ -1,0 +1,88 @@
+name: Auto-Pause Dry-Run
+
+# Phase A only. Generates the would-pause list for retire-bucket accounts.
+# No Instantly writes, no Supabase writes, no live pause mode.
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: auto-pause-dry-run
+  cancel-in-progress: false
+
+jobs:
+  dry-run:
+    name: Build auto-pause dry-run report
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout data-pipeline-v2
+        uses: actions/checkout@v4
+        with:
+          path: data-pipeline-v2
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: data-pipeline-v2/package-lock.json
+
+      - name: Install dependencies
+        working-directory: data-pipeline-v2
+        run: npm ci
+
+      - name: Run auto-pause dry-run
+        id: dry_run
+        working-directory: data-pipeline-v2
+        env:
+          PIPELINE_SUPABASE_DB_URL: ${{ secrets.PIPELINE_SUPABASE_DB_URL }}
+          RENAISSANCE_ROOT: ${{ github.workspace }}
+        run: |
+          npm run auto-pause:dry-run | tee auto-pause-dry-run.log
+          echo "report=deliverables/auto-pause/$(date -u +%F)-would-pause-summary.md" >> "$GITHUB_OUTPUT"
+          echo "accounts_csv=deliverables/auto-pause/$(date -u +%F)-would-pause-accounts.csv" >> "$GITHUB_OUTPUT"
+          echo "freshness_gate=$(grep 'freshness_gate=' auto-pause-dry-run.log | tail -n 1 | cut -d= -f2)" >> "$GITHUB_OUTPUT"
+          echo "would_pause_domains=$(grep 'would_pause_domains=' auto-pause-dry-run.log | tail -n 1 | cut -d= -f2)" >> "$GITHUB_OUTPUT"
+          echo "would_pause_accounts=$(grep 'would_pause_accounts=' auto-pause-dry-run.log | tail -n 1 | cut -d= -f2)" >> "$GITHUB_OUTPUT"
+          echo "estimated_cold_per_day_saved=$(grep 'estimated_cold_per_day_saved=' auto-pause-dry-run.log | tail -n 1 | cut -d= -f2)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload dry-run artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: auto-pause-dry-run-${{ github.run_id }}
+          path: |
+            deliverables/auto-pause/*-would-pause-summary.md
+            deliverables/auto-pause/*-would-pause-accounts.csv
+          if-no-files-found: error
+
+      - name: Notify Slack
+        if: always()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SUPERVISOR_SLACK_WEBHOOK_URL }}
+          JOB_STATUS: ${{ job.status }}
+          FRESHNESS_GATE: ${{ steps.dry_run.outputs.freshness_gate }}
+          WOULD_PAUSE_ACCOUNTS: ${{ steps.dry_run.outputs.would_pause_accounts }}
+          WOULD_PAUSE_DOMAINS: ${{ steps.dry_run.outputs.would_pause_domains }}
+          EST_COLD_PER_DAY: ${{ steps.dry_run.outputs.estimated_cold_per_day_saved }}
+          REPORT_PATH: ${{ steps.dry_run.outputs.report }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "::warning::SUPERVISOR_SLACK_WEBHOOK_URL not set - skipping Slack notification"
+            exit 0
+          fi
+
+          if [ "$JOB_STATUS" != "success" ]; then
+            TEXT=":rotating_light: Auto-pause dry-run FAILED <@U0AM2CQHW9E>\nRun: <$RUN_URL|workflow run>\nAction: investigate before any pause automation work"
+          elif [ "$FRESHNESS_GATE" != "PASS" ]; then
+            TEXT=":rotating_light: Auto-pause dry-run $(date -u +%F) <@U0AM2CQHW9E>\nWould pause: ${WOULD_PAUSE_ACCOUNTS:-0} accounts across ${WOULD_PAUSE_DOMAINS:-0} domains (~${EST_COLD_PER_DAY:-0} cold/day saved)\nFreshness gate: ${FRESHNESS_GATE:-UNKNOWN}\nReport: $REPORT_PATH\nRun: <$RUN_URL|workflow run>"
+          else
+            TEXT=":mag: Auto-pause dry-run $(date -u +%F)\nWould pause: ${WOULD_PAUSE_ACCOUNTS:-0} accounts across ${WOULD_PAUSE_DOMAINS:-0} domains (~${EST_COLD_PER_DAY:-0} cold/day saved)\nFreshness gate: ${FRESHNESS_GATE:-UNKNOWN}\nReport: $REPORT_PATH\nRun: <$RUN_URL|workflow run>"
+          fi
+
+          PAYLOAD=$(jq -n --arg text "$TEXT" '{text:$text}')
+          curl -s -X POST -H 'Content-Type: application/json' --data "$PAYLOAD" "$SLACK_WEBHOOK_URL"

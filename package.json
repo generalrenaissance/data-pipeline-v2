@@ -10,6 +10,7 @@
     "build:domain-registry": "node --import tsx scripts/build-domain-registry.ts",
     "score:domain-rr": "node --import tsx scripts/score-domain-rr.ts",
     "review:domain-rr": "node --import tsx scripts/build-rr-review-surface.ts",
+    "auto-pause:dry-run": "node --import tsx scripts/auto-pause-dry-run.ts",
     "probe:account-tags": "node --import tsx scripts/probe-account-tag-mappings.ts",
     "meetings:preview": "tsx scripts/preview-meetings-matcher.ts",
     "test": "node --import tsx --test test/*.test.ts",
