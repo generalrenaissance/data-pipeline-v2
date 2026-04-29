@@ -11,6 +11,7 @@
     "score:domain-rr": "node --import tsx scripts/score-domain-rr.ts",
     "review:domain-rr": "node --import tsx scripts/build-rr-review-surface.ts",
     "auto-pause:dry-run": "node --import tsx scripts/auto-pause-dry-run.ts",
+    "export:inbox-hub": "node --import tsx scripts/export-inbox-hub-json.ts",
     "probe:account-tags": "node --import tsx scripts/probe-account-tag-mappings.ts",
     "meetings:preview": "tsx scripts/preview-meetings-matcher.ts",
     "test": "node --import tsx --test test/*.test.ts",

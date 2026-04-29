@@ -1,0 +1,117 @@
+name: InboxHub JSON Export
+
+# Reads from public.infra_sheet_registry (refreshed daily at 04:00 UTC by
+# infra-sheet-registry-sync.yml from the live Renaissance Google Sheet),
+# applies the column allowlist enforced inside the script, and commits a
+# sanitized snapshot to data/inbox-hub-latest.json.
+#
+# This repo is PUBLIC. The script throws if any denied or unknown column
+# slips through. Defense in depth on top of that:
+#   - secret-scan.yml runs on every push
+#   - the commit step skips when the JSON is byte-identical (no churn)
+#   - SUPERVISOR_SLACK_WEBHOOK_URL pings #cc-sam on success and failure
+#
+# Runs at 04:30 UTC, 30 minutes after the registry sync, so the export
+# always reflects the most recent sheet snapshot.
+
+on:
+  schedule:
+    - cron: '30 4 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Read only; do not write or commit'
+        required: false
+        default: 'false'
+        type: string
+
+concurrency:
+  group: inbox-hub-export
+  cancel-in-progress: false
+
+jobs:
+  export:
+    name: Export InboxHub JSON snapshot
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Export InboxHub JSON
+        id: export
+        continue-on-error: true
+        run: |
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            npm run export:inbox-hub -- --dry-run
+          else
+            npm run export:inbox-hub
+          fi
+        env:
+          PIPELINE_SUPABASE_DB_URL: ${{ secrets.PIPELINE_SUPABASE_DB_URL }}
+
+      - name: Commit JSON if changed
+        if: steps.export.outcome == 'success' && github.event.inputs.dry_run != 'true'
+        id: commit
+        run: |
+          if git diff --quiet --exit-code data/inbox-hub-latest.json; then
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "::notice::No changes to data/inbox-hub-latest.json — skipping commit"
+            exit 0
+          fi
+          git config user.name "inbox-hub-export-bot"
+          git config user.email "actions@github.com"
+          ROW_COUNT=$(jq -r '.row_count' data/inbox-hub-latest.json)
+          SYNCED_AT=$(jq -r '.sheet_synced_at' data/inbox-hub-latest.json)
+          git add data/inbox-hub-latest.json
+          git commit -m "[bot] sync inbox-hub @ ${SYNCED_AT} (rows=${ROW_COUNT})"
+          git push
+          echo "changed=true" >> $GITHUB_OUTPUT
+
+      - name: Notify Slack
+        if: always()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SUPERVISOR_SLACK_WEBHOOK_URL }}
+          EXPORT_OUTCOME: ${{ steps.export.outcome }}
+          CHANGED: ${{ steps.commit.outputs.changed }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "::warning::SUPERVISOR_SLACK_WEBHOOK_URL not set — skipping Slack notification"
+            exit 0
+          fi
+          if [ "$EXPORT_OUTCOME" = "success" ]; then
+            STATUS=":white_check_mark: SUCCESS"
+            if [ "$CHANGED" = "false" ]; then
+              STATUS="$STATUS (no JSON changes)"
+            fi
+          else
+            STATUS=":skull: FAILED"
+          fi
+          MODE="cron"
+          if [ -n "$DRY_RUN" ]; then MODE="dispatch (dry_run=$DRY_RUN)"; fi
+          PAYLOAD=$(cat <<EOF
+          {
+            "text": "*InboxHub JSON Export*: $STATUS\n• mode: $MODE\n• outcome: $EXPORT_OUTCOME\n• <$RUN_URL|workflow run>"
+          }
+          EOF
+          )
+          curl -s -X POST -H 'Content-Type: application/json' --data "$PAYLOAD" "$SLACK_WEBHOOK_URL"
+
+      - name: Fail workflow if export step failed
+        if: steps.export.outcome == 'failure'
+        run: exit 1
