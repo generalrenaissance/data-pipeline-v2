@@ -16,7 +16,7 @@
 //   - Operational/financial: billing_date, domain_purchase_date, warmup_start_date, batch
 //   - The raw_row jsonb (contains all of the above)
 
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { Pool } from 'pg';
@@ -96,10 +96,24 @@ export function validateRowShape(row: Record<string, unknown>): void {
   }
 }
 
+function toIsoString(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === 'string') return value;
+  return String(value);
+}
+
 export function buildPayload(
-  rows: Record<AllowedColumn, unknown>[],
+  inputRows: Record<AllowedColumn, unknown>[],
   generatedAt: Date = new Date(),
 ): ExportPayload {
+  // pg returns timestamptz columns as Date objects; strings after a
+  // JSON round-trip. Normalize to ISO strings here so payload-equivalence
+  // checks compare like-with-like across both code paths.
+  const rows = inputRows.map((row) => ({
+    ...row,
+    sheet_synced_at: toIsoString(row.sheet_synced_at),
+  })) as Record<AllowedColumn, unknown>[];
   for (const row of rows) validateRowShape(row);
   const lastSync = rows.length > 0 ? (rows[0].sheet_synced_at as string | null) ?? null : null;
   return {
@@ -110,6 +124,19 @@ export function buildPayload(
     allowed_columns: ALLOWED_COLUMNS,
     rows,
   };
+}
+
+// Compare the data-bearing parts of two payloads. `generated_at` is
+// excluded so a re-run with identical underlying data is a no-op
+// even though the generation timestamp moved. Without this, the
+// daily cron would commit a fresh JSON every run regardless of
+// whether the sheet actually changed.
+export function payloadsEquivalent(a: ExportPayload, b: ExportPayload): boolean {
+  if (a.row_count !== b.row_count) return false;
+  if (a.sheet_synced_at !== b.sheet_synced_at) return false;
+  if (a.source !== b.source) return false;
+  if (JSON.stringify(a.allowed_columns) !== JSON.stringify(b.allowed_columns)) return false;
+  return JSON.stringify(a.rows) === JSON.stringify(b.rows);
 }
 
 async function main(): Promise<void> {
@@ -135,13 +162,13 @@ async function main(): Promise<void> {
 
     const rows = result.rows as Record<AllowedColumn, unknown>[];
     const payload = buildPayload(rows);
-    const json = JSON.stringify(payload, null, 2);
 
     console.log(`[inbox-hub-export] rows=${payload.row_count}`);
     console.log(`[inbox-hub-export] sheet_synced_at=${payload.sheet_synced_at ?? '(none)'}`);
-    console.log(`[inbox-hub-export] bytes=${json.length}`);
 
     if (dryRun) {
+      const json = JSON.stringify(payload, null, 2);
+      console.log(`[inbox-hub-export] bytes=${json.length}`);
       console.log(`[inbox-hub-export] dry_run=true (no write)`);
       const sample = rows[0];
       if (sample) {
@@ -151,6 +178,21 @@ async function main(): Promise<void> {
     }
 
     const outPath = path.resolve('data/inbox-hub-latest.json');
+    let existing: ExportPayload | null = null;
+    try {
+      const existingText = await readFile(outPath, 'utf-8');
+      existing = JSON.parse(existingText) as ExportPayload;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+
+    if (existing && payloadsEquivalent(existing, payload)) {
+      console.log(`[inbox-hub-export] no-op: rows + sheet_synced_at unchanged since last write`);
+      return;
+    }
+
+    const json = JSON.stringify(payload, null, 2);
+    console.log(`[inbox-hub-export] bytes=${json.length}`);
     await mkdir(path.dirname(outPath), { recursive: true });
     await writeFile(outPath, json + '\n', 'utf-8');
     console.log(`[inbox-hub-export] wrote=${outPath}`);
