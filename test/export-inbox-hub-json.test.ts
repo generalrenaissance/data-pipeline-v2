@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 
-import { buildPayload, validateRowShape } from '../scripts/export-inbox-hub-json';
+import { buildPayload, payloadsEquivalent, validateRowShape } from '../scripts/export-inbox-hub-json';
 
 const baseRow = {
   tag: 'RG3527',
@@ -78,4 +78,28 @@ test('buildPayload still validates every row, not just the first', () => {
   const goodRow = { ...baseRow };
   const badRow = { ...baseRow, technical: 'leaked' };
   assert.throws(() => buildPayload([goodRow, badRow]), /SECURITY: denied column/);
+});
+
+test('payloadsEquivalent ignores generated_at (the whole point of the fix)', () => {
+  const earlier = buildPayload([baseRow], new Date('2026-04-28T01:00:00.000Z'));
+  const later = buildPayload([baseRow], new Date('2026-04-29T04:30:00.000Z'));
+  assert.equal(payloadsEquivalent(earlier, later), true);
+});
+
+test('payloadsEquivalent detects row changes', () => {
+  const a = buildPayload([baseRow]);
+  const b = buildPayload([{ ...baseRow, sheet_status: 'Off-Group' }]);
+  assert.equal(payloadsEquivalent(a, b), false);
+});
+
+test('payloadsEquivalent detects row_count changes', () => {
+  const a = buildPayload([baseRow]);
+  const b = buildPayload([baseRow, { ...baseRow, tag: 'RG3528' }]);
+  assert.equal(payloadsEquivalent(a, b), false);
+});
+
+test('payloadsEquivalent detects sheet_synced_at changes', () => {
+  const a = buildPayload([baseRow]);
+  const b = buildPayload([{ ...baseRow, sheet_synced_at: '2026-04-29T06:34:17.686Z' }]);
+  assert.equal(payloadsEquivalent(a, b), false);
 });
